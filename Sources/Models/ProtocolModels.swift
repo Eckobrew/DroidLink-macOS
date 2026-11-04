@@ -37,6 +37,7 @@ public enum EnvelopeType: String, Codable, Sendable {
     case notificationPosted = "notification_posted"
     case notificationRemoved = "notification_removed"
     case notificationDismiss = "notification_dismiss"
+    case mediaControl = "media_control"
 }
 
 // MARK: - Pairing Models

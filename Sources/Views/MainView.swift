@@ -24,6 +24,7 @@ public struct MainView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .navigationTitle("")
                 .toolbar {
                     ToolbarItemGroup(placement: .principal) {
                         HStack(spacing: 2) {

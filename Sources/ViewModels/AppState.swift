@@ -40,6 +40,8 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
     // Notifications State
     @Published public var notifications: [AppNotification] = []
     @Published public var unreadNotificationCount: Int = 0
+    @Published public var activeMediaNotification: AppNotification? = nil
+    @Published public var isAudioHandoffActive: Bool = false
 
     // Messages State
     @Published public var threads: [ChatThread] = []
@@ -108,6 +110,51 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
             audioManager.autoConnectBluetooth(deviceName: phoneName)
         }
         checkBluetoothHandsetStatus()
+
+        NotificationCenter.default.addObserver(forName: NSNotification.Name("AudioHandoffChanged"), object: nil, queue: .main) { @Sendable [weak self] _ in
+            Task { @MainActor in
+                self?.isAudioHandoffActive = ScrcpyManager.shared.isAudioHandoffActive
+            }
+        }
+    }
+
+    // MARK: - Media Controls & Audio Handoff
+    public func toggleAudioHandoff() {
+        ScrcpyManager.shared.toggleAudioHandoff(phoneIp: connectedIp) { [weak self] success, msg in
+            Task { @MainActor in
+                self?.isAudioHandoffActive = ScrcpyManager.shared.isAudioHandoffActive
+            }
+        }
+    }
+
+    public func sendMediaCommand(_ action: String) {
+        let keyevent: String
+        switch action {
+        case "play_pause": keyevent = "85"
+        case "next": keyevent = "87"
+        case "previous": keyevent = "88"
+        case "volume_up": keyevent = "24"
+        case "volume_down": keyevent = "25"
+        default: keyevent = "85"
+        }
+        ScrcpyManager.shared.sendMediaKey(event: keyevent, phoneIp: connectedIp)
+
+        let payload: [String: String] = ["action": action]
+        if let json = try? JSONEncoder().encode(payload),
+           let str = String(data: json, encoding: .utf8) {
+            let env = MessageEnvelope(type: .mediaControl, payload: str)
+            connectionManager.sendEnvelope(env)
+        }
+    }
+
+    public func updateActiveMediaNotification() {
+        let mediaKeywords = ["spotify", "music", "youtube", "podcast", "audio", "sound", "deezer", "audible", "vlc", "pandora", "tidal", "radio", "player"]
+        let found = notifications.first { notif in
+            let pkg = notif.packageName.lowercased()
+            let app = notif.appName.lowercased()
+            return mediaKeywords.contains { pkg.contains($0) || app.contains($0) }
+        }
+        self.activeMediaNotification = found
     }
 
     public func requestNotificationPermissionsIfNeeded() {
@@ -228,15 +275,24 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
 
     // MARK: - Notifications Actions
     public func receiveNotificationSync(_ syncedNotifications: [AppNotification]) {
-        self.notifications = syncedNotifications.sorted { $0.timestamp > $1.timestamp }
+        self.notifications = syncedNotifications.filter { notif in
+            !Self.isSystemNoise(threadId: notif.appName, text: notif.text) &&
+            !Self.isSystemNoise(threadId: notif.appName, text: notif.title)
+        }.sorted { $0.timestamp > $1.timestamp }
         self.unreadNotificationCount = self.notifications.count
+        self.updateActiveMediaNotification()
         saveCachedData()
     }
 
     public func receiveNotificationPosted(_ notification: AppNotification) {
+        if Self.isSystemNoise(threadId: notification.appName, text: notification.text) ||
+           Self.isSystemNoise(threadId: notification.appName, text: notification.title) {
+            return
+        }
         self.notifications.removeAll { $0.id == notification.id }
         self.notifications.insert(notification, at: 0)
         self.unreadNotificationCount = self.notifications.count
+        self.updateActiveMediaNotification()
         saveCachedData()
 
         // Route to macOS notification toast while the Mac is "Online"
@@ -248,6 +304,7 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
     public func receiveNotificationRemoved(id: String) {
         self.notifications.removeAll { $0.id == id }
         self.unreadNotificationCount = self.notifications.count
+        self.updateActiveMediaNotification()
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
         }
@@ -378,6 +435,58 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         ScrcpyManager.shared.installApk(fileURL: fileURL, completion: completion)
     }
 
+    // MARK: - Filtering System Noise & Duplicates
+    public nonisolated static func isSystemNoise(threadId: String, text: String) -> Bool {
+        let tLow = threadId.lowercased()
+        let txtLow = text.lowercased()
+        return tLow == "device pairing" ||
+               tLow == "unknown" ||
+               txtLow.contains("messages is doing work") ||
+               txtLow.contains("your messages are available") ||
+               txtLow.contains("pairing with") ||
+               txtLow.contains("chat features") ||
+               txtLow.contains("rcs chats")
+    }
+
+    public nonisolated static func deduplicateMessageList(_ list: [ChatMessage]) -> [ChatMessage] {
+        var result: [ChatMessage] = []
+        var seenIds = Set<String>()
+        let sorted = list.sorted { $0.timestamp < $1.timestamp }
+        for msg in sorted {
+            let clean = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if clean.isEmpty || isSystemNoise(threadId: msg.threadId, text: clean) { continue }
+            if seenIds.contains(msg.id) { continue }
+
+            var isDup = false
+            for ex in result.suffix(20) {
+                if ex.isFromMe == msg.isFromMe &&
+                   ex.text.trimmingCharacters(in: .whitespacesAndNewlines) == clean &&
+                   abs(ex.timestamp.timeIntervalSince(msg.timestamp)) < 75.0 {
+                    isDup = true
+                    break
+                }
+            }
+            if !isDup {
+                seenIds.insert(msg.id)
+                result.append(msg)
+            } else {
+                if let idx = result.indices.suffix(20).first(where: {
+                    result[$0].isFromMe == msg.isFromMe &&
+                    result[$0].text.trimmingCharacters(in: .whitespacesAndNewlines) == clean &&
+                    abs(result[$0].timestamp.timeIntervalSince(msg.timestamp)) < 75.0
+                }) {
+                    if (result[idx].id.contains("-") || result[idx].id.contains("|")) &&
+                       (msg.id.hasPrefix("sms_") || msg.id.hasPrefix("mms_")) {
+                        seenIds.remove(result[idx].id)
+                        result[idx] = msg
+                        seenIds.insert(msg.id)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
     // MARK: - Message Actions
     public func receiveBulkChatMessages(_ syncedMessages: [ChatMessage]) {
         bulkMessageBuffer.append(contentsOf: syncedMessages)
@@ -410,18 +519,54 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
                 }
 
                 for (threadId, newMsgs) in incomingByThread {
+                    if Self.isSystemNoise(threadId: threadId, text: newMsgs.first?.text ?? "") {
+                        continue
+                    }
                     var existingList = store[threadId] ?? []
                     var ids = idMap[threadId] ?? Set(existingList.map { $0.id })
 
                     for msg in newMsgs {
+                        let cleanText = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if cleanText.isEmpty || Self.isSystemNoise(threadId: msg.threadId, text: cleanText) {
+                            continue
+                        }
+
                         if ids.contains(msg.id) {
                             if let idx = existingList.firstIndex(where: { $0.id == msg.id }) {
                                 existingList[idx] = msg
                             }
-                        } else {
-                            ids.insert(msg.id)
-                            existingList.append(msg)
+                            continue
                         }
+
+                        // Window-based fuzzy deduplication (same direction, same text, within 75s)
+                        var isDuplicate = false
+                        for existing in existingList.suffix(20) {
+                            if existing.isFromMe == msg.isFromMe &&
+                               existing.text.trimmingCharacters(in: .whitespacesAndNewlines) == cleanText &&
+                               abs(existing.timestamp.timeIntervalSince(msg.timestamp)) < 75.0 {
+                                isDuplicate = true
+                                break
+                            }
+                        }
+
+                        if isDuplicate {
+                            if let idx = existingList.indices.suffix(20).first(where: {
+                                existingList[$0].isFromMe == msg.isFromMe &&
+                                existingList[$0].text.trimmingCharacters(in: .whitespacesAndNewlines) == cleanText &&
+                                abs(existingList[$0].timestamp.timeIntervalSince(msg.timestamp)) < 75.0
+                            }) {
+                                if (existingList[idx].id.contains("-") || existingList[idx].id.contains("|")) &&
+                                   (msg.id.hasPrefix("sms_") || msg.id.hasPrefix("mms_")) {
+                                    ids.remove(existingList[idx].id)
+                                    existingList[idx] = msg
+                                    ids.insert(msg.id)
+                                }
+                            }
+                            continue
+                        }
+
+                        ids.insert(msg.id)
+                        existingList.append(msg)
                     }
 
                     existingList.sort { $0.timestamp < $1.timestamp }
@@ -474,6 +619,11 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
     }
 
     public func receiveChatMessage(_ msg: ChatMessage) {
+        let clean = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty || Self.isSystemNoise(threadId: msg.threadId, text: clean) {
+            return
+        }
+
         // Resolve target thread: either exact id, or match by contactName / address
         var targetThreadId = msg.threadId
         if let matched = threads.first(where: {
@@ -493,10 +643,22 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         if messageIdMap[targetThreadId]?.contains(msg.id) == true {
             return
         }
-        if let _ = messageStore[targetThreadId]?.suffix(15).first(where: {
+        if let existing = messageStore[targetThreadId]?.suffix(20).first(where: {
             $0.id == msg.id ||
-            ($0.isFromMe == msg.isFromMe && $0.text.trimmingCharacters(in: .whitespaces) == msg.text.trimmingCharacters(in: .whitespaces) && abs($0.timestamp.timeIntervalSince(msg.timestamp)) < 25)
+            ($0.isFromMe == msg.isFromMe &&
+             $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == clean &&
+             abs($0.timestamp.timeIntervalSince(msg.timestamp)) < 75.0)
         }) {
+            if let existingIdx = messageStore[targetThreadId]?.indices.suffix(20).first(where: {
+                messageStore[targetThreadId]![$0].id == existing.id
+            }) {
+                if (existing.id.contains("-") || existing.id.contains("|")) &&
+                   (msg.id.hasPrefix("sms_") || msg.id.hasPrefix("mms_")) {
+                    messageIdMap[targetThreadId]?.remove(existing.id)
+                    messageStore[targetThreadId]![existingIdx] = msg
+                    messageIdMap[targetThreadId]?.insert(msg.id)
+                }
+            }
             return
         }
 
@@ -811,8 +973,8 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         // 1. Fast load threads, calls, contacts, apps & notifications immediately for instant 0ms window display
         if let tData = try? Data(contentsOf: tUrl),
            let savedThreads = try? decoder.decode([ChatThread].self, from: tData) {
-            self.threads = savedThreads
-            self.selectedThreadId = savedThreads.first?.id
+            self.threads = savedThreads.filter { !Self.isSystemNoise(threadId: $0.id, text: $0.lastMessage) }
+            self.selectedThreadId = self.threads.first?.id
         }
 
         if let cData = try? Data(contentsOf: cUrl),
@@ -832,19 +994,26 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
 
         if let nData = try? Data(contentsOf: nUrl),
            let savedNotifs = try? decoder.decode([AppNotification].self, from: nData) {
-            self.notifications = savedNotifs
-            self.unreadNotificationCount = savedNotifs.count
+            self.notifications = savedNotifs.filter { !Self.isSystemNoise(threadId: $0.appName, text: $0.title) && !Self.isSystemNoise(threadId: $0.appName, text: $0.text) }
+            self.unreadNotificationCount = self.notifications.count
+            self.updateActiveMediaNotification()
         }
         recalculateUnreadCount()
 
-        // 2. Offload large 12,000+ message cache parsing and id set indexing completely to background thread
+        // 2. Offload large 12,000+ message cache parsing, filtering phantom threads, deduplication, and id indexing completely to background
         Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) { () -> ([String: [ChatMessage]], [String: Set<String>])? in
                 guard let mData = try? Data(contentsOf: mUrl),
-                      let msgs = try? JSONDecoder().decode([String: [ChatMessage]].self, from: mData) else { return nil }
+                      let rawMsgs = try? JSONDecoder().decode([String: [ChatMessage]].self, from: mData) else { return nil }
+                var msgs: [String: [ChatMessage]] = [:]
                 var idMap: [String: Set<String>] = [:]
-                for (tId, list) in msgs {
-                    idMap[tId] = Set(list.map { $0.id })
+                for (tId, list) in rawMsgs {
+                    if Self.isSystemNoise(threadId: tId, text: list.last?.text ?? "") {
+                        continue
+                    }
+                    let deduped = Self.deduplicateMessageList(list)
+                    msgs[tId] = deduped
+                    idMap[tId] = Set(deduped.map { $0.id })
                 }
                 return (msgs, idMap)
             }.value
@@ -856,6 +1025,7 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
                     self.messageIdMap = idMap
                     self.updateActiveThreadMessages()
                     self.recalculateUnreadCount()
+                    self.saveCachedData()
                 }
             }
         }

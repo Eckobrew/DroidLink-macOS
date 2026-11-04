@@ -11,7 +11,7 @@ struct DroidLinkApp: App {
                 .frame(minWidth: 850, minHeight: 550)
         }
         .windowStyle(.titleBar)
-        .windowToolbarStyle(.unified)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .newItem) {

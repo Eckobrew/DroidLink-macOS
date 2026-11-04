@@ -220,6 +220,124 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         }
     }
 
+    // MARK: - Audio Handoff to Mac
+    private var audioHandoffProcess: Process?
+    public private(set) var isAudioHandoffActive: Bool = false
+
+    public func toggleAudioHandoff(phoneIp: String?, completion: (@Sendable (Bool, String) -> Void)? = nil) {
+        if isAudioHandoffActive {
+            stopAudioHandoff()
+            completion?(false, "Audio handoff stopped, playing on phone")
+        } else {
+            startAudioHandoff(phoneIp: phoneIp, completion: completion)
+        }
+    }
+
+    public func startAudioHandoff(phoneIp: String?, completion: (@Sendable (Bool, String) -> Void)? = nil) {
+        guard let scrcpyPath = getScrcpyExecutablePath() else {
+            completion?(false, "scrcpy binary not found.")
+            return
+        }
+        guard let adbPath = getAdbExecutablePath() else {
+            completion?(false, "adb binary not found.")
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            if let ip = phoneIp, !ip.isEmpty {
+                self.connectAdb(adbPath: adbPath, ip: ip)
+            }
+
+            self.processLock.lock()
+            if let current = self.audioHandoffProcess, current.isRunning {
+                current.terminate()
+                self.audioHandoffProcess = nil
+            }
+
+            let scrcpyDir = URL(fileURLWithPath: scrcpyPath).deletingLastPathComponent().path
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: scrcpyPath)
+
+            // Audio only forwarder: no video window, forwards full audio output to Mac and silences phone
+            process.arguments = [
+                "--no-video",
+                "--audio-source=output",
+                "--audio-buffer=50"
+            ]
+
+            var environment = ProcessInfo.processInfo.environment
+            environment["ADB"] = adbPath
+            if let serverPath = self.getScrcpyServerPath() {
+                environment["SCRCPY_SERVER_PATH"] = serverPath
+            }
+            let currentPath = environment["PATH"] ?? ""
+            environment["PATH"] = "\(scrcpyDir):\(currentPath)"
+            process.environment = environment
+
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+
+            process.terminationHandler = { [weak self] proc in
+                self?.processLock.lock()
+                self?.isAudioHandoffActive = false
+                self?.audioHandoffProcess = nil
+                self?.processLock.unlock()
+                print("[ScrcpyManager] Audio handoff terminated (status: \(proc.terminationStatus))")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: NSNotification.Name("AudioHandoffChanged"), object: nil)
+                }
+            }
+
+            do {
+                try process.run()
+                self.audioHandoffProcess = process
+                self.isAudioHandoffActive = true
+                self.processLock.unlock()
+                print("[ScrcpyManager] Started audio handoff to Mac")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: NSNotification.Name("AudioHandoffChanged"), object: nil)
+                }
+                completion?(true, "Audio handoff active — playing on Mac")
+            } catch {
+                self.processLock.unlock()
+                print("[ScrcpyManager] Failed to start audio handoff: \(error)")
+                completion?(false, "Failed to start audio handoff: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    public func stopAudioHandoff() {
+        processLock.lock()
+        if let p = audioHandoffProcess, p.isRunning {
+            p.terminate()
+        }
+        audioHandoffProcess = nil
+        isAudioHandoffActive = false
+        processLock.unlock()
+        print("[ScrcpyManager] Audio handoff stopped")
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: NSNotification.Name("AudioHandoffChanged"), object: nil)
+        }
+    }
+
+    // MARK: - Media Controls via ADB
+    public func sendMediaKey(event: String, phoneIp: String? = nil) {
+        guard let adbPath = getAdbExecutablePath() else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            if let ip = phoneIp, !ip.isEmpty {
+                self?.connectAdb(adbPath: adbPath, ip: ip)
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: adbPath)
+            process.arguments = ["shell", "input", "keyevent", event]
+            try? process.run()
+            process.waitUntilExit()
+        }
+    }
+
     // MARK: - Drag-and-Drop APK Installation
     public func installApk(fileURL: URL, completion: @escaping @Sendable (Bool, String) -> Void) {
         guard let adbPath = getAdbExecutablePath() else {

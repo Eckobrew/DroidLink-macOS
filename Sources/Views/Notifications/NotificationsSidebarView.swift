@@ -126,6 +126,13 @@ public struct NotificationsSidebarView: View {
                 }
             }
 
+            // Media Controls Panel (only shown when media is controllable or audio handoff is active)
+            if appState.isAudioHandoffActive || appState.activeMediaNotification != nil {
+                Divider()
+                MediaControlsSidebarSection()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             Divider()
 
             // Clean Status Footer
@@ -172,6 +179,181 @@ public struct NotificationsSidebarView: View {
             .padding(.vertical, 8)
             .background(Color(NSColor.windowBackgroundColor))
         }
+    }
+}
+
+private struct MediaControlsSidebarSection: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Header Bar with App/Status
+            HStack(alignment: .center) {
+                HStack(spacing: 5) {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(appState.isAudioHandoffActive ? Color.accentColor : Color.secondary)
+
+                    Text(appState.activeMediaNotification?.appName.uppercased() ?? "PHONE MEDIA")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .tracking(0.4)
+                }
+
+                Spacer()
+
+                if appState.isAudioHandoffActive {
+                    HStack(spacing: 3) {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.system(size: 8))
+                        Text("Mac Audio")
+                            .font(.system(size: 8.5, weight: .bold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.accentColor.opacity(0.12))
+                    .clipShape(Capsule())
+                }
+            }
+
+            // Track & Artist Info with Album Artwork
+            HStack(spacing: 9) {
+                if let base64 = appState.activeMediaNotification?.iconBase64,
+                   let data = Data(base64Encoded: base64),
+                   let image = NSImage(data: data) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 38, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                        )
+                        .shadow(color: Color.black.opacity(0.15), radius: 2, x: 0, y: 1)
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(appState.isAudioHandoffActive ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12))
+                            .frame(width: 38, height: 38)
+
+                        Image(systemName: appState.isAudioHandoffActive ? "speaker.wave.3.fill" : "music.note")
+                            .font(.system(size: 14))
+                            .foregroundStyle(appState.isAudioHandoffActive ? Color.accentColor : Color.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(appState.activeMediaNotification?.title ?? (appState.pairedDevice?.name ?? "Phone Audio"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+
+                    Text(appState.activeMediaNotification?.text ?? (appState.activeTransport == .none ? "Phone disconnected" : "Ready to play"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    if let sub = appState.activeMediaNotification?.subText, !sub.isEmpty {
+                        Text(sub)
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            // Playback Controls Row (Previous, Play/Pause, Next)
+            HStack(spacing: 14) {
+                Spacer()
+
+                Button(action: {
+                    appState.sendMediaCommand("previous")
+                }) {
+                    Image(systemName: "backward.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.primary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Previous Track")
+
+                Button(action: {
+                    appState.sendMediaCommand("play_pause")
+                }) {
+                    ZStack {
+                        Circle()
+                            .fill(Color(NSColor.controlAccentColor))
+                            .frame(width: 28, height: 28)
+                        Image(systemName: "playpause.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Play / Pause")
+
+                Button(action: {
+                    appState.sendMediaCommand("next")
+                }) {
+                    Image(systemName: "forward.fill")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.primary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Next Track")
+
+                Spacer()
+            }
+            .padding(.vertical, 1)
+
+            // Audio Handoff Button
+            Button(action: {
+                appState.toggleAudioHandoff()
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: appState.isAudioHandoffActive ? "speaker.wave.3.fill" : "airplayaudio")
+                        .font(.system(size: 11, weight: .semibold))
+
+                    Text(appState.isAudioHandoffActive ? "Playing on Mac • Hand Back" : "Hand Off Audio to Mac")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+                .padding(.horizontal, 8)
+                .background(
+                    appState.isAudioHandoffActive
+                        ? Color(NSColor.controlAccentColor).opacity(0.2)
+                        : Color.primary.opacity(0.06)
+                )
+                .foregroundStyle(
+                    appState.isAudioHandoffActive
+                        ? Color(NSColor.controlAccentColor)
+                        : Color.primary
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(
+                            appState.isAudioHandoffActive
+                                ? Color(NSColor.controlAccentColor).opacity(0.5)
+                                : Color.primary.opacity(0.12),
+                            lineWidth: 0.8
+                        )
+                )
+            }
+            .buttonStyle(.plain)
+            .help(appState.isAudioHandoffActive ? "Disconnect audio stream and play on phone" : "Stream phone's internal audio to MacBook speakers")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.55))
     }
 }
 
