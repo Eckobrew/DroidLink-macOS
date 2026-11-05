@@ -6,6 +6,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
 
     private var activeProcess: Process?
     private let processLock = NSLock()
+    private let launchQueue = DispatchQueue(label: "DroidLink.scrcpy.launch", qos: .userInitiated)
 
     public private(set) var isRunning: Bool = false
     public private(set) var activeAppPackage: String? = nil
@@ -158,11 +159,14 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         let targetPkg = packageName ?? app?.packageName
         let name = appTitle ?? app?.name
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        launchQueue.async { [weak self] in
             guard let self = self else { return }
 
             // 1. Ensure ADB is connected to the phone
-            let serial = phoneIp.flatMap { $0.isEmpty ? nil : self.connectAdb(adbPath: adbPath, ip: $0) }
+            guard let serial = self.selectAdbDevice(adbPath: adbPath, host: phoneIp) else {
+                completion?(false, "No authorized ADB device found over USB or Wi-Fi.")
+                return
+            }
 
             self.processLock.lock()
             // If already running for this exact app, bring window forward
@@ -186,7 +190,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
                 arguments.append("--start-app=\(pkg)")
             }
 
-            if let serial { arguments.append("--serial=\(serial)") }
+            arguments.append("--serial=\(serial)")
             process.arguments = arguments
 
             // Setup environment
@@ -216,7 +220,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
                     self.activeProcess = nil
                 }
                 self.processLock.unlock()
-                if isCurrent && proc.terminationStatus != 0 {
+                if isCurrent && proc.terminationReason == .exit && proc.terminationStatus != 0 {
                     completion?(false, "Screen mirroring stopped (exit \(proc.terminationStatus)). Check that USB debugging is enabled and this Mac is authorized in Android's debugging settings.")
                 }
                 print("[ScrcpyManager] scrcpy exited with code: \(proc.terminationStatus)")
@@ -248,32 +252,60 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         }.first
     }
 
-    @discardableResult
-    private func connectAdb(adbPath: String, ip: String) -> String? {
-        let discovery = Process()
-        discovery.executableURL = URL(fileURLWithPath: adbPath)
-        discovery.arguments = ["mdns", "services"]
+    private func adbOutput(_ adbPath: String, _ arguments: [String]) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: adbPath)
+        process.arguments = arguments
         let output = Pipe()
-        discovery.standardOutput = output
-        var endpoint = "\(ip):5555" // Legacy adb tcpip fallback.
+        process.standardOutput = output
         do {
-            try discovery.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            discovery.waitUntilExit()
-            if let services = String(data: data, encoding: .utf8),
-               let discovered = Self.wirelessEndpoint(in: services, host: ip) {
-                endpoint = discovered
-            }
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: adbPath)
-            process.arguments = ["connect", endpoint]
             try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            return process.terminationStatus == 0 ? endpoint : nil
+            return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : ""
         } catch {
-            print("[ScrcpyManager] Could not connect ADB: \(error.localizedDescription)")
-            return nil
+            print("[ScrcpyManager] ADB command failed: \(error.localizedDescription)")
+            return ""
         }
+    }
+
+    private func selectAdbDevice(adbPath: String, host: String?) -> String? {
+        Self.selectAdbDevice(host: host) { adbOutput(adbPath, $0) }
+    }
+
+    static func selectAdbDevice(host: String?, run: ([String]) -> String) -> String? {
+        func authorizedDevices() -> [[Substring]] {
+            run(["devices", "-l"]).split(whereSeparator: \.isNewline)
+                .map { $0.split(whereSeparator: \.isWhitespace) }
+                .filter { $0.count >= 2 && $0[1] == "device" }
+        }
+
+        let devices = authorizedDevices()
+        let usb = devices.filter { $0.dropFirst(2).contains { $0.hasPrefix("usb:") } }
+        if usb.count == 1 { return String(usb[0][0]) }
+
+        let services = run(["mdns", "services"])
+        var endpointsByService: [String: String] = [:]
+        for line in services.split(whereSeparator: \.isNewline) {
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count == 3, fields[1] == "_adb-tls-connect._tcp" else { continue }
+            endpointsByService["\(fields[0]).\(fields[1])"] = String(fields[2])
+        }
+
+        let serials = devices.map { String($0[0]) }
+        guard let host, !host.isEmpty else {
+            // ADB can list both an mDNS name and an IP for the same wireless connection.
+            let endpoints = Set(serials.map { endpointsByService[$0] ?? $0 })
+            return endpoints.count == 1 ? serials.first : nil
+        }
+
+        let endpoint = Self.wirelessEndpoint(in: services, host: host) ?? "\(host):5555"
+        if let serial = serials.first(where: { (endpointsByService[$0] ?? $0).hasPrefix("\(host):") }) {
+            return serial
+        }
+
+        _ = run(["connect", endpoint])
+        return authorizedDevices().contains { $0[0] == endpoint } ? endpoint : nil
     }
 
     public func terminateSession() {
@@ -312,7 +344,10 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let serial = phoneIp.flatMap { $0.isEmpty ? nil : self.connectAdb(adbPath: adbPath, ip: $0) }
+            guard let serial = self.selectAdbDevice(adbPath: adbPath, host: phoneIp) else {
+                completion?(false, "No authorized ADB device found over USB or Wi-Fi.")
+                return
+            }
 
             self.processLock.lock()
             if let current = self.audioHandoffProcess, current.isRunning {
@@ -330,7 +365,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
                 "--audio-source=output",
                 "--audio-buffer=50"
             ]
-            if let serial { process.arguments?.append("--serial=\(serial)") }
+            process.arguments?.append("--serial=\(serial)")
 
             var environment = ProcessInfo.processInfo.environment
             environment["ADB"] = adbPath
@@ -399,19 +434,17 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
     public func sendMediaKey(event: String, phoneIp: String? = nil) {
         guard let adbPath = getAdbExecutablePath() else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            if let ip = phoneIp, !ip.isEmpty {
-                self?.connectAdb(adbPath: adbPath, ip: ip)
-            }
+            guard let serial = self?.selectAdbDevice(adbPath: adbPath, host: phoneIp) else { return }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: adbPath)
-            process.arguments = ["shell", "input", "keyevent", event]
+            process.arguments = ["-s", serial, "shell", "input", "keyevent", event]
             try? process.run()
             process.waitUntilExit()
         }
     }
 
     // MARK: - Drag-and-Drop APK Installation
-    public func installApk(fileURL: URL, completion: @escaping @Sendable (Bool, String) -> Void) {
+    public func installApk(fileURL: URL, phoneIp: String? = nil, completion: @escaping @Sendable (Bool, String) -> Void) {
         guard let adbPath = getAdbExecutablePath() else {
             completion(false, "ADB executable not found.")
             return
@@ -425,7 +458,11 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: adbPath)
-            process.arguments = ["install", "-r", fileURL.path]
+            guard let serial = self.selectAdbDevice(adbPath: adbPath, host: phoneIp) else {
+                completion(false, "No authorized ADB device found over USB or Wi-Fi.")
+                return
+            }
+            process.arguments = ["-s", serial, "install", "-r", fileURL.path]
 
             let pipe = Pipe()
             process.standardOutput = pipe
