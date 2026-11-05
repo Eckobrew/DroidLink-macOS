@@ -14,7 +14,9 @@ public struct QRCodeView: View {
             VStack(spacing: 24) {
                 headerView
                 qrCardView
-                networkDetailsView
+                Text("Connect both devices to the same Wi-Fi network to pair. Bluetooth keeps them connected afterward when available.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).frame(maxWidth: 450)
                 pairedDeviceView
             }
             .padding(24)
@@ -62,21 +64,8 @@ public struct QRCodeView: View {
                     .frame(width: 240, height: 240)
             }
 
-            // Security Fingerprint Badge
-            HStack(spacing: 8) {
-                Image(systemName: "lock.shield.fill")
-                    .foregroundStyle(.green)
-                Text("E2EE Verification Code:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(CryptoManager.shared.verificationFingerprint)
-                    .font(.system(.caption, design: .monospaced))
-                    .fontWeight(.bold)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.green.opacity(0.15))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
+            Label("End-to-end encrypted", systemImage: "lock.shield.fill")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .padding(24)
         .background(Color(NSColor.controlBackgroundColor))
@@ -85,50 +74,6 @@ public struct QRCodeView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
         )
-    }
-
-    @ViewBuilder
-    private var networkDetailsView: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Connection Endpoints")
-                .font(.headline)
-
-            HStack(spacing: 16) {
-                Label {
-                    VStack(alignment: .leading) {
-                        Text("Wi-Fi Transport")
-                            .fontWeight(.medium)
-                        Text(localIps.isEmpty ? "No active Wi-Fi" : "\(localIps.joined(separator: ", ")):8765")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } icon: {
-                    Image(systemName: "wifi")
-                        .font(.title3)
-                        .foregroundStyle(localIps.isEmpty ? Color.secondary : Color.blue)
-                }
-
-                Spacer()
-
-                Label {
-                    VStack(alignment: .leading) {
-                        Text("Bluetooth Fallback")
-                            .fontWeight(.medium)
-                        Text("Broadcasting GATT Service")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } icon: {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.title3)
-                        .foregroundStyle(.blue)
-                }
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: 550)
-        .background(Color(NSColor.controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder
@@ -144,7 +89,7 @@ public struct QRCodeView: View {
                             Text(paired.name)
                                 .font(.headline)
                         }
-                        Text("Paired & Encrypted via \(appState.activeTransport.rawValue)")
+                        Text(appState.activeTransport == .none ? "Paired • Disconnected" : "Connected via \(appState.activeTransport.rawValue)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

@@ -5,7 +5,6 @@ public struct SettingsView: View {
     @State private var availableAudioDevices: [AudioDeviceItem] = CallAudioManager.shared.getAvailableAudioDevices()
     @State private var selectedAudioDeviceId: UInt32 = CallAudioManager.shared.getDefaultOutputDevice() ?? 0
     @State private var selectedInputDeviceId: UInt32 = CallAudioManager.shared.getDefaultInputDevice() ?? 0
-    @State private var preferRcsByDefault: Bool = true
     @State private var autoConnectBluetooth = ConnectionManager.shared.bluetoothFallbackEnabled
     @State private var selectedPhoneAddress = UserDefaults.standard.string(forKey: "callBluetoothPhoneAddress") ?? ""
     @State private var showPairingSheet: Bool = false
@@ -19,8 +18,6 @@ public struct SettingsView: View {
                 Form {
                     connectionSection
                     callsSection
-                    messagesSection
-                    cryptoSection
                     if appState.pairedDevice != nil {
                         dangerZoneSection
                     }
@@ -77,11 +74,7 @@ public struct SettingsView: View {
                                     .fontWeight(.medium)
                             }
 
-                            if let ip = ConnectionManager.shared.connectedIp {
-                                Text("• \(ip)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
+
                         }
                     }
 
@@ -115,8 +108,8 @@ public struct SettingsView: View {
 
     @ViewBuilder
     private var connectionSection: some View {
-        Section("Connection & Transport") {
-            LabeledContent("Active Transport") {
+        Section("Connection") {
+            LabeledContent("Status") {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(appState.activeTransport == .none ? Color.red : Color.green)
@@ -126,35 +119,25 @@ public struct SettingsView: View {
                 }
             }
 
-            LabeledContent("Wi-Fi Listener Port") {
-                Text("8765 (mDNS / Bonjour _droiddock._tcp)")
-                    .foregroundStyle(.secondary)
-            }
-
-            Toggle("Auto-fallback to Bluetooth LE when Wi-Fi drops", isOn: $autoConnectBluetooth)
+            Toggle("Use Bluetooth when Wi-Fi is unavailable", isOn: $autoConnectBluetooth)
                 .onChange(of: autoConnectBluetooth) { _, enabled in ConnectionManager.shared.setBluetoothFallbackEnabled(enabled) }
         }
     }
 
     @ViewBuilder
     private var callsSection: some View {
-        Section("Phone Calls & Handset Audio") {
+        Section("Calls & Audio") {
             Picker("Bluetooth phone", selection: $selectedPhoneAddress) {
                 Text("Choose paired phone").tag("")
                 ForEach(CallAudioManager.shared.pairedPhones(), id: \.addressString) { phone in
-                    Text(phone.name ?? phone.addressString ?? "Phone").tag(phone.addressString ?? "")
+                    Text(phone.name ?? "Phone").tag(phone.addressString ?? "")
                 }
             }
             .onChange(of: selectedPhoneAddress) { _, address in
                 if !address.isEmpty { CallAudioManager.shared.connectPhone(address: address) }
             }
-            Text("Pair the phone in macOS Bluetooth settings, then select it here. Android also needs the companion call-control association.")
+            Text("Pair the phone in macOS Bluetooth settings, then select it here. Enable call controls in the Android app.")
                 .font(.caption).foregroundStyle(.secondary)
-
-            LabeledContent("Handset Routing") {
-                Text("Mac hands-free client (HFP)")
-                    .foregroundStyle(.secondary)
-            }
 
             if availableAudioDevices.isEmpty {
                 Text("No external audio devices found.")
@@ -183,44 +166,8 @@ public struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var messagesSection: some View {
-        Section("Messages & RCS") {
-            Toggle("Prefer RCS over SMS whenever recipient is RCS-capable", isOn: $preferRcsByDefault)
-            LabeledContent("RCS Carrier Bridge") {
-                Text("Active via Google Messages Companion Engine")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var cryptoSection: some View {
-        Section("End-to-End Cryptography") {
-            LabeledContent("Key Agreement") {
-                Text("ECDH P-256 (secp256r1)")
-                    .foregroundStyle(.secondary)
-            }
-            LabeledContent("Symmetric Cipher") {
-                Text("AES-256-GCM (128-bit Auth Tag)")
-                    .foregroundStyle(.secondary)
-            }
-            LabeledContent("Verification Fingerprint") {
-                Text(CryptoManager.shared.verificationFingerprint)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.green)
-            }
-            LabeledContent("Local Public Key") {
-                let keyPrefix = String(CryptoManager.shared.localPublicKeyBase64.prefix(20))
-                Text("\(keyPrefix)...")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
     private var dangerZoneSection: some View {
-        Section("Paired Device Management") {
+        Section("Paired Phone") {
             Button(role: .destructive) {
                 appState.unpairCurrentDevice()
             } label: {
