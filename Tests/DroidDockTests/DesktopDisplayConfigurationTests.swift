@@ -8,6 +8,8 @@ final class DesktopDisplayConfigurationTests: XCTestCase {
         XCTAssertFalse(arguments.contains("--fullscreen"))
         XCTAssertFalse(arguments.contains("--flex-display"))
         XCTAssertTrue(arguments.contains("--no-vd-destroy-content"))
+        XCTAssertTrue(arguments.contains("--keyboard=uhid"))
+        XCTAssertTrue(arguments.contains("--display-ime-policy=hide"))
     }
     func testFullScreenDesktopUsesTargetWorkspaceSize() {
         let configuration = DesktopDisplayConfiguration(width: 2560, height: 1600, fullScreen: true)

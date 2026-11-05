@@ -22,7 +22,7 @@ public struct DesktopDisplayConfiguration: Sendable, Equatable {
         return Self(width: renderWidth, height: renderHeight, fullScreen: true, windowX: windowX, windowY: windowY)
     }
     var arguments: [String] {
-        var args = ["--new-display=\(width)x\(height)/160", "--display-ime-policy=local", "--no-vd-destroy-content", "--max-fps=60", "--keep-active"]
+        var args = ["--new-display=\(width)x\(height)/160", "--display-ime-policy=hide", "--keyboard=uhid", "--no-vd-destroy-content", "--max-fps=60", "--keep-active"]
         if fullScreen { args += ["--fullscreen", "--window-borderless"] }
         if let windowX, let windowY {
             args += ["--window-x=\(windowX)", "--window-y=\(windowY)", "--window-width=640", "--window-height=400"]
