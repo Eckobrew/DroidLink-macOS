@@ -1,6 +1,15 @@
 import SwiftUI
 
 @main
+struct DroidLinkLauncher {
+    static func main() {
+        if ProcessInfo.processInfo.environment["DROIDLINK_TRANSPORT_PROBE"] == "1" {
+            Task { @MainActor in await TransportProbe().run() }
+            RunLoop.main.run()
+        } else { DroidLinkApp.main() }
+    }
+}
+
 struct DroidLinkApp: App {
     @StateObject private var appState = AppState()
 

@@ -8,162 +8,160 @@ public protocol BluetoothTransportDelegate: AnyObject, Sendable {
 
 public final class BluetoothTransport: NSObject, @unchecked Sendable {
     public static var serviceUUID: CBUUID { CBUUID(string: "DF010001-B123-4ABC-9DEF-0123456789AB") }
-    public static var rxCharUUID: CBUUID  { CBUUID(string: "DF010002-B123-4ABC-9DEF-0123456789AB") } // Android -> Mac
-    public static var txCharUUID: CBUUID  { CBUUID(string: "DF010003-B123-4ABC-9DEF-0123456789AB") } // Mac -> Android
-
+    public static var rxCharUUID: CBUUID { CBUUID(string: "DF010002-B123-4ABC-9DEF-0123456789AB") }
+    public static var txCharUUID: CBUUID { CBUUID(string: "DF010003-B123-4ABC-9DEF-0123456789AB") }
     public weak var delegate: BluetoothTransportDelegate?
-    public private(set) var isConnected: Bool = false
-
-    private var peripheralManager: CBPeripheralManager?
-    private var txCharacteristic: CBMutableCharacteristic?
-    private var connectedCentral: CBCentral?
+    private let stateLock = NSLock()
+    private var connected = false
+    private var activity = Date.distantPast
+    public var lastActivity: Date { stateLock.withLock { activity } }
+    private func recordActivity() { stateLock.withLock { activity = Date() } }
+    public var isConnected: Bool { stateLock.withLock { connected } }
     private let queue = DispatchQueue(label: "com.droiddock.bluetooth", qos: .userInitiated)
+    private var manager: CBPeripheralManager?
+    private var tx: CBMutableCharacteristic?
+    private var central: CBCentral?
+    private var decoder = BLEFrameDecoder()
+    private var outgoing = BLEFrameQueue()
+    private var completions: [UUID: @Sendable (Error?) -> Void] = [:]
+    private var lastProgress = Date()
+    private var watchdog: DispatchSourceTimer?
 
-    // Reassembly buffers: CentralID -> (totalChunks, expected, chunks)
-    private var inboundChunks: [UUID: [Int: Data]] = [:]
-    private var inboundTotals: [UUID: Int] = [:]
-
-    public override init() {
-        super.init()
+    private func setConnected(_ value: Bool) {
+        let changed = stateLock.withLock { let old = connected; connected = value; return old != value }
+        if changed { delegate?.bluetoothTransportDidChangeState(isConnected: value) }
     }
 
     public func startAdvertising() {
         queue.async {
-            if self.peripheralManager == nil {
-                self.peripheralManager = CBPeripheralManager(delegate: self, queue: self.queue)
+            guard self.manager == nil else { return }
+            self.manager = CBPeripheralManager(delegate: self, queue: self.queue)
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 5, repeating: 5)
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.outgoing.isEmpty, Date().timeIntervalSince(self.lastProgress) > 30 else { return }
+                self.resetPeer(error: self.failure("Bluetooth send stalled"))
             }
+            self.watchdog = timer
+            timer.resume()
         }
     }
 
     public func stop() {
         queue.async {
-            self.peripheralManager?.stopAdvertising()
-            self.peripheralManager = nil
-            self.isConnected = false
-            self.connectedCentral = nil
-            self.delegate?.bluetoothTransportDidChangeState(isConnected: false)
+            self.watchdog?.cancel(); self.watchdog = nil
+            self.manager?.stopAdvertising()
+            self.manager?.removeAllServices()
+            self.resetPeer(error: self.failure("Bluetooth stopped"))
+            self.manager = nil; self.tx = nil
         }
+    }
+
+    public func disconnect() { queue.async { self.resetPeer(error: self.failure("Bluetooth disconnected")) } }
+
+    private func failure(_ message: String) -> NSError {
+        NSError(domain: "BluetoothTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func resetPeer(error: Error) {
+        print("[BluetoothTransport] Reset peer: \(error.localizedDescription)")
+        central = nil
+        decoder.reset(); outgoing.reset()
+        let callbacks = Array(completions.values)
+        completions.removeAll()
+        setConnected(false)
+        callbacks.forEach { $0(error) }
     }
 
     public func send(data: Data, completion: (@Sendable (Error?) -> Void)? = nil) {
         queue.async {
-            guard let tx = self.txCharacteristic, let central = self.connectedCentral, self.isConnected else {
-                completion?(NSError(domain: "BluetoothTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "No active Bluetooth central connected"]))
-                return
+            guard self.central != nil, self.tx != nil, self.isConnected else {
+                completion?(self.failure("No Bluetooth subscriber")); return
             }
+            do {
+                let id = UUID()
+                let wasEmpty = self.outgoing.isEmpty
+                try self.outgoing.enqueue(data, id: id)
+                if let completion { self.completions[id] = completion }
+                if wasEmpty { self.lastProgress = Date() }
+                self.drain()
+            } catch { completion?(error) }
+        }
+    }
 
-            // Chunk data into 500-byte segments (standard safe BLE 5.0 MTU)
-            let chunkSize = 500
-            let totalChunks = Int(ceil(Double(data.count) / Double(chunkSize)))
-
-            for i in 0..<totalChunks {
-                let start = i * chunkSize
-                let end = min(start + chunkSize, data.count)
-                let subdata = data.subdata(in: start..<end)
-
-                var packet = Data([UInt8(i), UInt8(totalChunks)])
-                packet.append(subdata)
-
-                let didSend = self.peripheralManager?.updateValue(packet, for: tx, onSubscribedCentrals: [central]) ?? false
-                if !didSend {
-                    // Queue full, small yield
-                    Thread.sleep(forTimeInterval: 0.01)
-                    _ = self.peripheralManager?.updateValue(packet, for: tx, onSubscribedCentrals: [central])
-                }
-            }
-            completion?(nil)
+    private func drain() {
+        guard let manager, let central, let tx else { return }
+        let maximum = min(512, central.maximumUpdateValueLength)
+        while let chunk = outgoing.peek(maximumLength: maximum) {
+            guard manager.updateValue(chunk, for: tx, onSubscribedCentrals: [central]) else { return }
+            lastProgress = Date()
+            recordActivity()
+            if let id = outgoing.commit(chunk.count) { completions.removeValue(forKey: id)?(nil) }
         }
     }
 }
 
-// MARK: - CBPeripheralManagerDelegate
 extension BluetoothTransport: CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        if peripheral.state == .poweredOn {
-            let rx = CBMutableCharacteristic(
-                type: Self.rxCharUUID,
-                properties: [.write, .writeWithoutResponse],
-                value: nil,
-                permissions: [.writeable]
-            )
-
-            let tx = CBMutableCharacteristic(
-                type: Self.txCharUUID,
-                properties: [.notify, .read],
-                value: nil,
-                permissions: [.readable]
-            )
-            self.txCharacteristic = tx
-
-            let service = CBMutableService(type: Self.serviceUUID, primary: true)
-            service.characteristics = [rx, tx]
-
-            peripheral.add(service)
-            peripheral.startAdvertising([
-                CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID],
-                CBAdvertisementDataLocalNameKey: "Droid Link"
-            ])
-            print("[BluetoothTransport] Advertising BLE GATT service")
-        } else {
-            print("[BluetoothTransport] Bluetooth state: \(peripheral.state.rawValue)")
-            isConnected = false
-            delegate?.bluetoothTransportDidChangeState(isConnected: false)
+        print("[BluetoothTransport] Peripheral state: \(peripheral.state.rawValue)")
+        guard peripheral.state == .poweredOn else {
+            tx = nil
+            resetPeer(error: failure("Bluetooth is unavailable"))
+            return
         }
+        peripheral.removeAllServices()
+        let rx = CBMutableCharacteristic(type: Self.rxCharUUID, properties: [.write], value: nil, permissions: [.writeable])
+        let tx = CBMutableCharacteristic(type: Self.txCharUUID, properties: [.notify], value: nil, permissions: [])
+        self.tx = tx
+        let service = CBMutableService(type: Self.serviceUUID, primary: true)
+        service.characteristics = [rx, tx]
+        peripheral.add(service)
     }
 
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        guard error == nil else { return }
+        peripheral.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID]])
+    }
+
+    public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        print("[BluetoothTransport] Advertising: \(error?.localizedDescription ?? "ready")")
+    }
+
+    public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) { drain() }
+
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        if characteristic.uuid == Self.txCharUUID {
-            print("[BluetoothTransport] Central subscribed to TX: \(central.identifier)")
-            connectedCentral = central
-            isConnected = true
-            delegate?.bluetoothTransportDidChangeState(isConnected: true)
-        }
+        guard characteristic.uuid == Self.txCharUUID else { return }
+        print("[BluetoothTransport] Subscriber ATT payload: \(central.maximumUpdateValueLength)")
+        if let current = self.central, current.identifier != central.identifier { return }
+        if self.central != nil { resetPeer(error: failure("Bluetooth subscription restarted")) }
+        decoder.reset()
+        self.central = central
+        setConnected(true)
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
-        if characteristic.uuid == Self.txCharUUID {
-            print("[BluetoothTransport] Central unsubscribed from TX: \(central.identifier)")
-            if connectedCentral?.identifier == central.identifier {
-                connectedCentral = nil
-                isConnected = false
-                delegate?.bluetoothTransportDidChangeState(isConnected: false)
-            }
-        }
+        if central.identifier == self.central?.identifier { resetPeer(error: failure("Phone unsubscribed")) }
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
-        for request in requests {
-            if request.characteristic.uuid == Self.rxCharUUID, let val = request.value, val.count >= 2 {
-                let chunkIdx = Int(val[0])
-                let totalChunks = Int(val[1])
-                let payload = val.subdata(in: 2..<val.count)
-                let centralId = request.central.identifier
-
-                if inboundChunks[centralId] == nil {
-                    inboundChunks[centralId] = [:]
-                    inboundTotals[centralId] = totalChunks
-                }
-
-                inboundChunks[centralId]?[chunkIdx] = payload
-
-                if let currentChunks = inboundChunks[centralId], currentChunks.count == totalChunks {
-                    // Reassemble in order
-                    var assembled = Data()
-                    for idx in 0..<totalChunks {
-                        if let part = currentChunks[idx] {
-                            assembled.append(part)
-                        }
-                    }
-                    inboundChunks.removeValue(forKey: centralId)
-                    inboundTotals.removeValue(forKey: centralId)
-
-                    delegate?.bluetoothTransportDidReceive(data: assembled)
-                }
-
-                peripheral.respond(to: request, withResult: .success)
-            } else {
-                peripheral.respond(to: request, withResult: .requestNotSupported)
+        guard let first = requests.first else { return }
+        guard requests.allSatisfy({ $0.characteristic.uuid == Self.rxCharUUID && $0.central.identifier == central?.identifier }) else {
+            peripheral.respond(to: first, withResult: .insufficientAuthorization)
+            return
+        }
+        do {
+            let parts = try requests.map { request -> (offset: Int, value: Data) in
+                guard let value = request.value else { throw BLEFrameError.invalidLength }
+                return (request.offset, value)
             }
+            let bytes = try BLEWriteBatch.flatten(parts)
+            recordActivity()
+            let frames = try decoder.append(bytes)
+            peripheral.respond(to: first, withResult: .success)
+            frames.forEach { delegate?.bluetoothTransportDidReceive(data: $0) }
+        } catch {
+            peripheral.respond(to: first, withResult: .invalidPdu)
+            resetPeer(error: error)
         }
     }
 }

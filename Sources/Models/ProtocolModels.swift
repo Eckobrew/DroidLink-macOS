@@ -18,14 +18,21 @@ public struct MessageEnvelope: Codable, Sendable {
 public enum EnvelopeType: String, Codable, Sendable {
     case pairingRequest = "pairing_request"
     case pairingResponse = "pairing_response"
+    case transportProbe = "transport_probe"
+    case transportEndpoints = "transport_endpoints"
+    case envelopeAck = "envelope_ack"
     case heartbeat = "heartbeat"
     case chatMessage = "chat_message"
     case chatSync = "chat_sync"
+    case chatCapabilities = "chat_capabilities"
+    case attachmentRequest = "attachment_request"
+    case attachmentData = "attachment_data"
     case chatSend = "chat_send"
     case chatStatusUpdate = "chat_status_update"
     case callSync = "call_sync"
     case callIncoming = "call_incoming"
     case callStateUpdate = "call_state_update"
+    case callActionResult = "call_action_result"
     case callAction = "call_action"
     case bluetoothPairRequest = "bluetooth_pair_request"
     case bluetoothPairResponse = "bluetooth_pair_response"
@@ -38,6 +45,7 @@ public enum EnvelopeType: String, Codable, Sendable {
     case notificationRemoved = "notification_removed"
     case notificationDismiss = "notification_dismiss"
     case mediaControl = "media_control"
+    case unpair = "unpair"
 }
 
 // MARK: - Pairing Models
@@ -114,6 +122,7 @@ public struct PairedDevice: Codable, Identifiable, Sendable {
 
 // MARK: - Messages & RCS Models
 public enum MessageProtocolType: String, Codable, Sendable {
+    case unknown = "Unconfirmed"
     case rcs = "RCS"
     case sms = "SMS"
     case mms = "MMS"
@@ -124,7 +133,24 @@ public enum MessageDeliveryStatus: String, Codable, Sendable {
     case sent = "sent"
     case delivered = "delivered"
     case read = "read"
+    case onPhone = "on_phone"
     case failed = "failed"
+
+    public func canTransition(to next: MessageDeliveryStatus) -> Bool {
+        switch self {
+        case .sending: return true
+        case .sent: return next == .delivered || next == .read || next == .failed
+        case .delivered: return next == .read
+        case .onPhone: return next == .sent || next == .delivered || next == .failed
+        case .read, .failed: return false
+        }
+    }
+}
+
+public struct MessageAttachment: Codable, Hashable, Sendable {
+    public let url: String
+    public let mimeType: String
+    public init(url: String, mimeType: String) { self.url = url; self.mimeType = mimeType }
 }
 
 public struct ChatMessage: Codable, Identifiable, Sendable {
@@ -136,12 +162,14 @@ public struct ChatMessage: Codable, Identifiable, Sendable {
     public let text: String
     public let timestamp: Date
     public var status: MessageDeliveryStatus
-    public let messageType: MessageProtocolType
+    public var messageType: MessageProtocolType
     public let attachmentUrl: String?
     public let attachmentMimeType: String?
+    public let attachments: [MessageAttachment]
+    public var hasContent: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || attachmentUrl != nil }
 
     private enum CodingKeys: String, CodingKey {
-        case id, threadId, senderName, senderAddress, isFromMe, text, timestamp, status, messageType, attachmentUrl, attachmentMimeType
+        case id, threadId, senderName, senderAddress, isFromMe, text, timestamp, status, messageType, attachmentUrl, attachmentMimeType, attachments
     }
 
     public init(
@@ -155,7 +183,8 @@ public struct ChatMessage: Codable, Identifiable, Sendable {
         status: MessageDeliveryStatus = .sent,
         messageType: MessageProtocolType = .rcs,
         attachmentUrl: String? = nil,
-        attachmentMimeType: String? = nil
+        attachmentMimeType: String? = nil,
+        attachments: [MessageAttachment] = []
     ) {
         self.id = id
         self.threadId = threadId
@@ -168,6 +197,7 @@ public struct ChatMessage: Codable, Identifiable, Sendable {
         self.messageType = messageType
         self.attachmentUrl = attachmentUrl
         self.attachmentMimeType = attachmentMimeType
+        self.attachments = attachments
     }
 
     public init(from decoder: Decoder) throws {
@@ -179,9 +209,10 @@ public struct ChatMessage: Codable, Identifiable, Sendable {
         self.isFromMe = (try? container.decode(Bool.self, forKey: .isFromMe)) ?? false
         self.text = (try? container.decode(String.self, forKey: .text)) ?? ""
         self.status = (try? container.decode(MessageDeliveryStatus.self, forKey: .status)) ?? .delivered
-        self.messageType = (try? container.decode(MessageProtocolType.self, forKey: .messageType)) ?? .rcs
+        self.messageType = (try? container.decode(MessageProtocolType.self, forKey: .messageType)) ?? .unknown
         self.attachmentUrl = try? container.decodeIfPresent(String.self, forKey: .attachmentUrl)
         self.attachmentMimeType = try? container.decodeIfPresent(String.self, forKey: .attachmentMimeType)
+        self.attachments = (try? container.decode([MessageAttachment].self, forKey: .attachments)) ?? []
 
         if let ts = try? container.decode(Double.self, forKey: .timestamp) {
             if ts > 1_000_000_000_000 {
@@ -210,6 +241,7 @@ public struct ChatMessage: Codable, Identifiable, Sendable {
         try container.encode(messageType, forKey: .messageType)
         try container.encodeIfPresent(attachmentUrl, forKey: .attachmentUrl)
         try container.encodeIfPresent(attachmentMimeType, forKey: .attachmentMimeType)
+        try container.encode(attachments, forKey: .attachments)
         try container.encode(timestamp.timeIntervalSince1970 * 1000.0, forKey: .timestamp)
     }
 }
@@ -290,6 +322,7 @@ public struct OutgoingMessageRequest: Codable, Sendable {
     public let recipient: String
     public let text: String
     public let preferRcs: Bool
+    public var imageBase64: String? = nil
 
     public init(id: String = UUID().uuidString, threadId: String, recipient: String, text: String, preferRcs: Bool = true) {
         self.id = id
@@ -318,6 +351,9 @@ public enum CallDirection: String, Codable, Sendable {
 }
 
 public struct PhoneCall: Codable, Identifiable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case id, phoneNumber, contactName, state, direction, startTime, duration, isMuted, isSpeaker
+    }
     public let id: String
     public let phoneNumber: String
     public var contactName: String
@@ -367,6 +403,19 @@ public struct PhoneCall: Codable, Identifiable, Sendable {
             self.startTime = try? container.decode(Date.self, forKey: .startTime)
         }
     }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(phoneNumber, forKey: .phoneNumber)
+        try container.encode(contactName, forKey: .contactName)
+        try container.encode(state, forKey: .state)
+        try container.encode(direction, forKey: .direction)
+        try container.encodeIfPresent(startTime.map { $0.timeIntervalSince1970 * 1000 }, forKey: .startTime)
+        try container.encode(duration, forKey: .duration)
+        try container.encode(isMuted, forKey: .isMuted)
+        try container.encode(isSpeaker, forKey: .isSpeaker)
+    }
+
 }
 
 public enum CallActionType: String, Codable, Sendable {
@@ -377,6 +426,9 @@ public enum CallActionType: String, Codable, Sendable {
     case mute = "mute"
     case unmute = "unmute"
     case dtmf = "dtmf"
+    case audioPhone = "audio_phone"
+    case audioSpeaker = "audio_speaker"
+    case audioBluetooth = "audio_bluetooth"
 }
 
 public struct CallActionPayload: Codable, Sendable {
@@ -465,6 +517,7 @@ public struct AppNotification: Codable, Identifiable, Hashable, Sendable {
     public let iconBase64: String?
     public let canReply: Bool
     public let isClearable: Bool
+    public let isMediaPlayback: Bool?
 
     public init(
         id: String,
@@ -476,7 +529,8 @@ public struct AppNotification: Codable, Identifiable, Hashable, Sendable {
         timestamp: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
         iconBase64: String? = nil,
         canReply: Bool = false,
-        isClearable: Bool = true
+        isClearable: Bool = true,
+        isMediaPlayback: Bool? = false
     ) {
         self.id = id
         self.packageName = packageName
@@ -488,6 +542,7 @@ public struct AppNotification: Codable, Identifiable, Hashable, Sendable {
         self.iconBase64 = iconBase64
         self.canReply = canReply
         self.isClearable = isClearable
+        self.isMediaPlayback = isMediaPlayback
     }
 
     public var date: Date {

@@ -1,10 +1,16 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct ChatDetailView: View {
     let thread: ChatThread
     @EnvironmentObject var appState: AppState
     @State private var inputText: String = ""
     @State private var preferRcs: Bool = true
+    @State private var imageData: Data?
+    @State private var choosingImage = false
+    @State private var preparingImage = false
+    private var canUseMessagingApp: Bool { appState.canUseMessagingApp(threadId: thread.id) }
+    private var canSend: Bool { !preparingImage && (imageData != nil || (!inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (!thread.id.hasPrefix("notification_group_") || canUseMessagingApp))) }
 
     private var visibleMessages: [ChatMessage] {
         appState.activeThreadMessages
@@ -91,7 +97,7 @@ public struct ChatDetailView: View {
                     .frame(maxWidth: 780)
                     .frame(maxWidth: .infinity, alignment: .center)
                 }
-                .onChange(of: visibleMessages.count) { _, _ in
+                .onChange(of: visibleMessages.last?.id) { _, _ in
                     if let lastMsg = visibleMessages.last {
                         proxy.scrollTo(lastMsg.id, anchor: .bottom)
                     }
@@ -106,23 +112,36 @@ public struct ChatDetailView: View {
 
             Divider()
 
+            if let imageData, let image = NSImage(data: imageData) {
+                HStack {
+                    Image(nsImage: image).resizable().scaledToFit().frame(height: 80)
+                    Text("Finish sending this image on your phone.").font(.caption)
+                    Button("Remove") { self.imageData = nil }
+                    Spacer()
+                }.padding(8)
+            }
             // Composer Area
             HStack(spacing: 12) {
+                Button { choosingImage = true } label: { Image(systemName: "photo.badge.plus") }
+                    .help("Choose an image to send using the phone composer")
+                    .disabled(preparingImage)
                 // Protocol Selector
+                if canUseMessagingApp && imageData == nil {
                 Menu {
-                    Button("Prefer RCS") { preferRcs = true }
+                    Button("Use messaging app (RCS / SMS)") { preferRcs = true }
                     Button("Send as SMS") { preferRcs = false }
                 } label: {
-                    Text(preferRcs ? "RCS" : "SMS")
+                    Text(preferRcs ? "Auto" : "SMS")
                         .font(.caption)
                         .fontWeight(.bold)
                         .foregroundStyle(preferRcs ? Color.blue : Color.secondary)
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 44)
+                } else { Text(imageData != nil ? "Image" : (thread.id.hasPrefix("notification_group_") ? "Unavailable" : "SMS")).font(.caption).foregroundStyle(.secondary) }
 
                 // Text Input
-                TextField(preferRcs ? "RCS Message..." : "Text Message...", text: $inputText)
+                TextField(preferRcs ? "Message..." : "SMS Message...", text: $inputText)
                     .textFieldStyle(.plain)
                     .font(.body)
                     .padding(8)
@@ -138,19 +157,41 @@ public struct ChatDetailView: View {
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 26))
-                        .foregroundStyle(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : Color.blue)
+                        .foregroundStyle(!canSend ? Color.secondary : Color.blue)
                 }
                 .buttonStyle(.plain)
-                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canSend)
             }
             .padding(12)
             .background(Color(NSColor.windowBackgroundColor))
+        }
+        .task(id: thread.id) {
+            inputText = ""
+            imageData = nil
+            while !Task.isCancelled {
+                appState.refreshMessageCapabilities(threadId: thread.id, recipient: thread.contactAddress.isEmpty ? thread.id : thread.contactAddress)
+                do { try await Task.sleep(for: .seconds(15)) } catch { break }
+            }
+        }
+        .fileImporter(isPresented: $choosingImage, allowedContentTypes: [.image]) { result in
+            guard case .success(let url) = result else { return }
+            let selectedThread = thread.id
+            preparingImage = true
+            Task {
+                do {
+                    let data = try await Task.detached { try MessageImageEncoder.jpeg(from: url) }.value
+                    if selectedThread == appState.selectedThreadId { imageData = data }
+                } catch { appState.messageError = "Unable to open this image. Choose another image under 3 MB after resizing." }
+                preparingImage = false
+            }
         }
     }
 
     private func sendMessage() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard canSend else { return }
+        let image = imageData
+        imageData = nil
         inputText = ""
 
         let targetNumber = (thread.contactAddress.isEmpty || thread.contactAddress == "Me") ? thread.id : thread.contactAddress
@@ -158,7 +199,8 @@ public struct ChatDetailView: View {
             to: targetNumber,
             text: text,
             threadId: thread.id,
-            isRcs: preferRcs
+            isRcs: preferRcs && canUseMessagingApp,
+            imageData: image
         )
     }
 }

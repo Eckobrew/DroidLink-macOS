@@ -8,11 +8,21 @@ public protocol WiFiTransportDelegate: AnyObject, Sendable {
 
 public final class WiFiTransport: @unchecked Sendable {
     private var listener: NWListener?
+    private var listeningRequested = false
     private var activeConnection: NWConnection?
     private let queue = DispatchQueue(label: "com.droiddock.wifi", qos: .userInitiated)
     public weak var delegate: WiFiTransportDelegate?
-    public private(set) var isConnected: Bool = false
-    public private(set) var remoteHost: String? = nil
+    private let stateLock = NSLock()
+    private var connected = false
+    private var host: String?
+    public private(set) var isConnected: Bool {
+        get { stateLock.withLock { connected } }
+        set { stateLock.withLock { connected = newValue } }
+    }
+    public private(set) var remoteHost: String? {
+        get { stateLock.withLock { host } }
+        set { stateLock.withLock { host = newValue } }
+    }
     public let port: UInt16
 
     public init(port: UInt16 = 8765) {
@@ -20,23 +30,44 @@ public final class WiFiTransport: @unchecked Sendable {
     }
 
     public func startListening() throws {
-        let params = NWParameters.tcp
+        try queue.sync {
+            listeningRequested = true
+            guard listener == nil else { return }
+            do { try createListener() }
+            catch { scheduleListenerRecovery(); throw error }
+        }
+    }
+
+    private func createListener() throws {
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 2
+        tcpOptions.keepaliveInterval = 1
+        tcpOptions.keepaliveCount = 2
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
         params.allowLocalEndpointReuse = true
         params.includePeerToPeer = true
 
         let nwPort = NWEndpoint.Port(rawValue: port) ?? NWEndpoint.Port(integerLiteral: 8765)
-        listener = try NWListener(using: params, on: nwPort)
+        let newListener = try NWListener(using: params, on: nwPort)
+        listener = newListener
 
         // Advertise Bonjour service for seamless local discovery
         listener?.service = NWListener.Service(name: "DroidDock-\(Host.current().localizedName ?? "Mac")", type: "_droiddock._tcp")
 
-        listener?.stateUpdateHandler = { [weak self] state in
+        listener?.stateUpdateHandler = { [weak self, weak newListener] state in
+            guard let self, let newListener, self.listener === newListener else { return }
             switch state {
             case .ready:
-                print("[WiFiTransport] NWListener ready on port \(self?.port ?? 0)")
+                print("[WiFiTransport] NWListener ready on port \(self.port)")
             case .failed(let error):
                 print("[WiFiTransport] NWListener failed: \(error)")
-                self?.listener?.cancel()
+                self.listener = nil
+                newListener.cancel()
+                self.scheduleListenerRecovery()
+            case .cancelled:
+                self.listener = nil
+                self.scheduleListenerRecovery()
             default:
                 break
             }
@@ -49,18 +80,41 @@ public final class WiFiTransport: @unchecked Sendable {
         listener?.start(queue: queue)
     }
 
+    private func scheduleListenerRecovery() {
+        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.listeningRequested, self.listener == nil else { return }
+            do { try self.createListener() }
+            catch {
+                print("[WiFiTransport] Listener restart failed: \(error)")
+                self.scheduleListenerRecovery()
+            }
+        }
+    }
+
     public func stop() {
-        activeConnection?.cancel()
-        activeConnection = nil
-        listener?.cancel()
-        listener = nil
-        isConnected = false
-        delegate?.wifiTransportDidChangeState(isConnected: false)
+        queue.async {
+            self.listeningRequested = false
+            self.activeConnection?.cancel()
+            self.activeConnection = nil
+            self.listener?.cancel(); self.listener = nil
+            self.isConnected = false; self.remoteHost = nil
+            self.delegate?.wifiTransportDidChangeState(isConnected: false)
+        }
+    }
+
+    public func disconnectActiveConnection() {
+        queue.async { [weak self] in
+            guard let self = self, let connection = self.activeConnection else { return }
+            print("[WiFiTransport] Disconnecting active connection by watchdog/unpair")
+            connection.cancel()
+            self.cleanupConnection(connection)
+        }
     }
 
     private func handleIncomingConnection(_ connection: NWConnection) {
         activeConnection?.cancel()
         activeConnection = connection
+        remoteHost = nil
 
         if case .hostPort(let host, _) = connection.endpoint {
             switch host {
@@ -72,7 +126,7 @@ public final class WiFiTransport: @unchecked Sendable {
         }
 
         connection.stateUpdateHandler = { [weak self] state in
-            guard let self = self else { return }
+            guard let self = self, self.activeConnection === connection else { return }
             switch state {
             case .ready:
                 print("[WiFiTransport] Client connected via Wi-Fi")
@@ -96,13 +150,15 @@ public final class WiFiTransport: @unchecked Sendable {
     private func cleanupConnection(_ connection: NWConnection) {
         if activeConnection === connection {
             activeConnection = nil
+            connection.cancel()
             isConnected = false
             remoteHost = nil
             delegate?.wifiTransportDidChangeState(isConnected: false)
         }
     }
 
-    private func receiveExact(count: Int, accumulated: Data = Data(), on connection: NWConnection, completion: @escaping (Data?) -> Void) {
+    private func receiveExact(count: Int, accumulated: Data = Data(), on connection: NWConnection, completion: @escaping @Sendable (Data?) -> Void) {
+        guard activeConnection === connection else { completion(nil); return }
         let remaining = count - accumulated.count
         guard remaining > 0 else {
             completion(accumulated)
@@ -116,9 +172,8 @@ public final class WiFiTransport: @unchecked Sendable {
                 return
             }
             guard let data = content, !data.isEmpty else {
-                if isComplete {
-                    completion(nil)
-                }
+                if isComplete { completion(nil) }
+                else { self?.receiveExact(count: count, accumulated: accumulated, on: connection, completion: completion) }
                 return
             }
 
@@ -139,8 +194,8 @@ public final class WiFiTransport: @unchecked Sendable {
                 return
             }
 
-            let length = Int(data.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            guard length > 0 && length < 25_000_000 else {
+            let length = Int(data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian })
+            guard length > 0 && length <= BLEFrameDecoder.maximumFrameSize else {
                 self.cleanupConnection(connection)
                 return
             }
@@ -151,6 +206,7 @@ public final class WiFiTransport: @unchecked Sendable {
                     return
                 }
 
+                guard self.activeConnection === connection else { return }
                 self.delegate?.wifiTransportDidReceive(data: payload)
                 self.receiveNextMessage(on: connection)
             }
@@ -158,19 +214,17 @@ public final class WiFiTransport: @unchecked Sendable {
     }
 
     public func send(data: Data, completion: (@Sendable (Error?) -> Void)? = nil) {
-        guard let connection = activeConnection, isConnected else {
-            completion?(NSError(domain: "WiFiTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "No active Wi-Fi connection"]))
-            return
+        queue.async {
+            guard let connection = self.activeConnection, self.isConnected,
+                  let framed = try? BLEFrameDecoder.encode(data) else {
+                completion?(NSError(domain: "WiFiTransport", code: -1, userInfo: [NSLocalizedDescriptionKey: "No active Wi-Fi connection or invalid frame"]))
+                return
+            }
+            connection.send(content: framed, completion: .contentProcessed { [weak self] error in
+                if error != nil { self?.cleanupConnection(connection) }
+                completion?(error)
+            })
         }
-
-        var framedData = Data()
-        var lengthBE = UInt32(data.count).bigEndian
-        withUnsafeBytes(of: &lengthBE) { framedData.append(contentsOf: $0) }
-        framedData.append(data)
-
-        connection.send(content: framedData, completion: .contentProcessed { error in
-            completion?(error)
-        })
     }
 
     /// Fetches all active non-loopback local IPv4 and IPv6 network addresses for QR code generation

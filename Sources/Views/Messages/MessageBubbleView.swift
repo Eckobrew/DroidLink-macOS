@@ -2,9 +2,11 @@ import SwiftUI
 
 public struct MessageBubbleView: View {
     let message: ChatMessage
+    @EnvironmentObject private var appState: AppState
 
     private var bubbleBackground: Color {
         if message.isFromMe {
+            if message.messageType == .unknown { return Color.gray }
             return message.messageType == .rcs ? Color.blue : Color.green.opacity(0.85)
         } else {
             return Color(NSColor.controlBackgroundColor)
@@ -16,7 +18,14 @@ public struct MessageBubbleView: View {
             if message.isFromMe { Spacer(minLength: 60) }
 
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 3) {
+                ForEach(message.attachments, id: \.url) { attachment in
+                    MessageImageView(attachment: attachment)
+                }
+                if message.attachments.isEmpty, let url = message.attachmentUrl {
+                    MessageImageView(attachment: MessageAttachment(url: url, mimeType: message.attachmentMimeType ?? "image/jpeg"))
+                }
                 // Main Bubble
+                if !message.text.isEmpty {
                 Text(message.text)
                     .font(.body)
                     .foregroundStyle(message.isFromMe ? .white : .primary)
@@ -29,10 +38,15 @@ public struct MessageBubbleView: View {
                             .stroke(message.isFromMe ? Color.clear : Color.secondary.opacity(0.15), lineWidth: 1)
                     )
 
+                }
+
                 // Sub-caption: Timestamp, Protocol badge, Status
                 HStack(spacing: 4) {
                     if message.isFromMe {
                         statusIcon(for: message.status)
+                        Text(message.status == .onPhone ? "Finish sending on phone" : (message.status == .sent && message.messageType == .unknown ? "Sent to messaging app" : message.status.rawValue.capitalized))
+                            .font(.caption2)
+                            .foregroundStyle(message.status == .failed ? .red : .secondary)
                     }
 
                     Text(timeString(from: message.timestamp))
@@ -48,6 +62,13 @@ public struct MessageBubbleView: View {
                         .foregroundStyle(message.messageType == .rcs ? .blue : .secondary)
                 }
                 .padding(.horizontal, 4)
+
+                if message.isFromMe && message.status == .failed && message.attachments.isEmpty {
+                    Button("Retry as SMS") { appState.retryMessageAsSms(message) }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+
             }
 
             if !message.isFromMe { Spacer(minLength: 60) }
@@ -58,6 +79,8 @@ public struct MessageBubbleView: View {
     @ViewBuilder
     private func statusIcon(for status: MessageDeliveryStatus) -> some View {
         switch status {
+        case .onPhone:
+            Image(systemName: "iphone.and.arrow.forward").font(.caption2)
         case .sending:
             ProgressView()
                 .controlSize(.mini)

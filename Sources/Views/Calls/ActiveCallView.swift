@@ -46,7 +46,7 @@ public struct ActiveCallView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "headphones")
                         .font(.caption)
-                    Text("Handset Mode: Bluetooth Audio")
+                    Text(appState.isCallAudioConnected ? "Call audio connected to Mac" : "Call audio on phone / connecting")
                         .font(.caption)
                 }
                 .padding(.horizontal, 10)
@@ -67,7 +67,8 @@ public struct ActiveCallView: View {
                         onCall: { _ in },
                         onDigitTapped: { digit in
                             appState.sendDtmf(digit: digit)
-                        }
+                        },
+                        allowsDialing: false
                     )
                     .scaleEffect(0.85)
                 }
@@ -123,8 +124,9 @@ public struct ActiveCallView: View {
 
                 // Audio Device Menu
                 Menu {
-                    Button("Bluetooth Hands-Free (Android)") { }
-                    Button("MacBook Speakers & Microphone") { }
+                    Button("Mac via Bluetooth") { appState.selectCallAudio(.audioBluetooth) }
+                    Button("Phone earpiece / wired headset") { appState.selectCallAudio(.audioPhone) }
+                    Button("Phone speaker") { appState.selectCallAudio(.audioSpeaker) }
                     Divider()
                     Button("Audio Settings...") {
                         appState.selectedNavigation = .settings

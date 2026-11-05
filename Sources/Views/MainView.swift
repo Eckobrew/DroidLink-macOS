@@ -69,6 +69,15 @@ public struct MainView: View {
                     .zIndex(100)
             }
         }
+        .alert("Message could not be prepared", isPresented: Binding(get: { appState.messageError != nil }, set: { if !$0 { appState.messageError = nil } })) {
+            Button("OK") { appState.messageError = nil }
+        } message: { Text(appState.messageError ?? "") }
+        .alert("Call command failed", isPresented: Binding(get: { appState.callError != nil }, set: { if !$0 { appState.callError = nil } })) {
+            Button("OK") { appState.callError = nil }
+        } message: { Text(appState.callError ?? "") }
+        .alert("Bluetooth setup", isPresented: Binding(get: { appState.bluetoothSetupMessage != nil }, set: { if !$0 { appState.bluetoothSetupMessage = nil } })) {
+            Button("OK") { appState.bluetoothSetupMessage = nil }
+        } message: { Text(appState.bluetoothSetupMessage ?? "") }
         .onAppear {
             appState.requestNotificationPermissionsIfNeeded()
         }

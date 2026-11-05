@@ -58,7 +58,7 @@ public final class CryptoManager: @unchecked Sendable {
     }
 
     /// Establishes an E2E shared secret with the remote peer's public key
-    public func establishSharedKey(deviceId: String, remotePublicKeyBase64: String, salt: String = "DroidDock_E2EE_v1") throws {
+    public func establishSharedKey(deviceId: String, remotePublicKeyBase64: String, salt: String = "DroidDock_E2EE_v1", persistPeer: Bool = true) throws {
         guard let pubData = Data(base64Encoded: remotePublicKeyBase64),
               let remotePublicKey = try? P256.KeyAgreement.PublicKey(x963Representation: pubData) else {
             throw CryptoError.invalidPublicKey
@@ -81,7 +81,7 @@ public final class CryptoManager: @unchecked Sendable {
         sharedKeys[deviceId] = symmetricKey
         lastInboundSequence.removeValue(forKey: deviceId)
         outboundSequence = 0
-        KeychainStore.save(key: "droiddock_peer_key_\(deviceId)", data: pubData)
+        if persistPeer { KeychainStore.save(key: "droiddock_peer_key_\(deviceId)", data: pubData) }
     }
 
     /// Restores a previously paired peer
@@ -110,11 +110,7 @@ public final class CryptoManager: @unchecked Sendable {
     /// Wire format: [8-byte sequence][12-byte Nonce][Ciphertext + 16-byte GCM Tag]
     public func encrypt(deviceId: String, plaintext: Data) throws -> Data {
         lock.lock()
-        var key = sharedKeys[deviceId]
-        if key == nil, let first = sharedKeys.values.first {
-            key = first
-        }
-        guard let symmetricKey = key else {
+        guard let symmetricKey = sharedKeys[deviceId] else {
             lock.unlock()
             throw CryptoError.noSharedKeyEstablished
         }
@@ -122,14 +118,14 @@ public final class CryptoManager: @unchecked Sendable {
         let seq = outboundSequence
         lock.unlock()
 
+        var seqBE = seq.bigEndian
+        let sequenceData = withUnsafeBytes(of: &seqBE) { Data($0) }
         let nonce = AES.GCM.Nonce()
-        guard let sealedBox = try? AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce) else {
+        guard let sealedBox = try? AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonce, authenticating: sequenceData) else {
             throw CryptoError.encryptionFailed
         }
 
-        var packet = Data()
-        var seqBE = seq.bigEndian
-        withUnsafeBytes(of: &seqBE) { packet.append(contentsOf: $0) }
+        var packet = sequenceData
         packet.append(contentsOf: nonce)
         packet.append(sealedBox.ciphertext)
         packet.append(sealedBox.tag)
@@ -139,11 +135,7 @@ public final class CryptoManager: @unchecked Sendable {
     /// Decrypts ciphertext bytes with AES-256-GCM, validating authentication tag and sequence order.
     public func decrypt(deviceId: String, packet: Data) throws -> Data {
         lock.lock()
-        var key = sharedKeys[deviceId]
-        if key == nil, let first = sharedKeys.values.first {
-            key = first
-        }
-        guard let symmetricKey = key else {
+        guard let symmetricKey = sharedKeys[deviceId] else {
             lock.unlock()
             throw CryptoError.noSharedKeyEstablished
         }
@@ -155,7 +147,7 @@ public final class CryptoManager: @unchecked Sendable {
         }
 
         let seqData = packet.prefix(8)
-        let seq = seqData.withUnsafeBytes { $0.load(as: UInt64.self).bigEndian }
+        let seq = seqData.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).bigEndian }
 
         let nonceData = packet.subdata(in: 8..<20)
         let ciphertextAndTag = packet.suffix(from: 20)
@@ -164,24 +156,17 @@ public final class CryptoManager: @unchecked Sendable {
 
         guard let nonce = try? AES.GCM.Nonce(data: nonceData),
               let sealedBox = try? AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext, tag: tagData),
-              let decrypted = try? AES.GCM.open(sealedBox, using: symmetricKey) else {
+              let decrypted = try? AES.GCM.open(sealedBox, using: symmetricKey, authenticating: seqData) else {
             throw CryptoError.decryptionFailed
         }
 
         lock.lock()
         let lastSeq = lastInboundSequence[deviceId] ?? 0
-        if seq <= lastSeq && seq != 1 && lastSeq != 0 {
-            if seq <= 10 && lastSeq > 10 {
-                // New session sequence reset from reconnected phone
-                lastInboundSequence[deviceId] = seq
-            } else {
-                lock.unlock()
-                print("[CryptoManager] Replay detected: seq=\(seq), lastSeq=\(lastSeq)")
-                throw CryptoError.replayDetected
-            }
-        } else {
-            lastInboundSequence[deviceId] = seq
+        guard seq > lastSeq else {
+            lock.unlock()
+            throw CryptoError.replayDetected
         }
+        lastInboundSequence[deviceId] = seq
         lock.unlock()
 
         return decrypted

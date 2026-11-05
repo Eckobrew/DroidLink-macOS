@@ -4,6 +4,7 @@ public struct DialerPadView: View {
     @Binding var phoneNumber: String
     var onCall: (String) -> Void
     var onDigitTapped: ((Character) -> Void)?
+    var allowsDialing: Bool = true
 
     private let keyMatrix: [[(digit: Character, letters: String)]] = [
         [("1", ""), ("2", "A B C"), ("3", "D E F")],
@@ -51,7 +52,7 @@ public struct DialerPadView: View {
                                 phoneNumber.append(item.digit)
                                 onDigitTapped?(item.digit)
                             } onLongPress: {
-                                if item.digit == "0" {
+                                if item.digit == "0" && allowsDialing {
                                     phoneNumber.append("+")
                                     onDigitTapped?("+")
                                 }
@@ -62,6 +63,7 @@ public struct DialerPadView: View {
             }
 
             // Green Call Button
+            if allowsDialing {
             Button {
                 let trimmed = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return }
@@ -78,6 +80,7 @@ public struct DialerPadView: View {
             }
             .buttonStyle(.plain)
             .disabled(phoneNumber.isEmpty)
+            }
         }
         .frame(maxWidth: 320)
     }

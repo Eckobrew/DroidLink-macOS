@@ -2,9 +2,12 @@ import SwiftUI
 
 public struct SettingsView: View {
     @EnvironmentObject var appState: AppState
-    @State private var availableAudioDevices: [AudioDeviceItem] = []
+    @State private var availableAudioDevices: [AudioDeviceItem] = CallAudioManager.shared.getAvailableAudioDevices()
+    @State private var selectedAudioDeviceId: UInt32 = CallAudioManager.shared.getDefaultOutputDevice() ?? 0
+    @State private var selectedInputDeviceId: UInt32 = CallAudioManager.shared.getDefaultInputDevice() ?? 0
     @State private var preferRcsByDefault: Bool = true
-    @State private var autoConnectBluetooth: Bool = true
+    @State private var autoConnectBluetooth = ConnectionManager.shared.bluetoothFallbackEnabled
+    @State private var selectedPhoneAddress = UserDefaults.standard.string(forKey: "callBluetoothPhoneAddress") ?? ""
     @State private var showPairingSheet: Bool = false
 
     public var body: some View {
@@ -28,6 +31,11 @@ public struct SettingsView: View {
         }
         .onAppear {
             availableAudioDevices = CallAudioManager.shared.getAvailableAudioDevices()
+            if let defaultId = CallAudioManager.shared.getDefaultOutputDevice() {
+                selectedAudioDeviceId = defaultId
+            } else if let first = availableAudioDevices.first {
+                selectedAudioDeviceId = first.id
+            }
         }
         .sheet(isPresented: $showPairingSheet) {
             VStack(spacing: 0) {
@@ -64,7 +72,7 @@ public struct SettingsView: View {
                                 Circle()
                                     .fill(appState.activeTransport == .none ? Color.orange : Color.green)
                                     .frame(width: 8, height: 8)
-                                Text(appState.activeTransport == .none ? "Connecting..." : "Connected via \(appState.activeTransport.rawValue)")
+                                Text(appState.activeTransport == .none ? "Disconnected" : "Connected via \(appState.activeTransport.rawValue)")
                                     .font(.caption)
                                     .fontWeight(.medium)
                             }
@@ -124,14 +132,27 @@ public struct SettingsView: View {
             }
 
             Toggle("Auto-fallback to Bluetooth LE when Wi-Fi drops", isOn: $autoConnectBluetooth)
+                .onChange(of: autoConnectBluetooth) { _, enabled in ConnectionManager.shared.setBluetoothFallbackEnabled(enabled) }
         }
     }
 
     @ViewBuilder
     private var callsSection: some View {
         Section("Phone Calls & Handset Audio") {
+            Picker("Bluetooth phone", selection: $selectedPhoneAddress) {
+                Text("Choose paired phone").tag("")
+                ForEach(CallAudioManager.shared.pairedPhones(), id: \.addressString) { phone in
+                    Text(phone.name ?? phone.addressString ?? "Phone").tag(phone.addressString ?? "")
+                }
+            }
+            .onChange(of: selectedPhoneAddress) { _, address in
+                if !address.isEmpty { CallAudioManager.shared.connectPhone(address: address) }
+            }
+            Text("Pair the phone in macOS Bluetooth settings, then select it here. Android also needs the companion call-control association.")
+                .font(.caption).foregroundStyle(.secondary)
+
             LabeledContent("Handset Routing") {
-                Text("Bluetooth Audio Gateway (HFP)")
+                Text("Mac hands-free client (HFP)")
                     .foregroundStyle(.secondary)
             }
 
@@ -140,10 +161,22 @@ public struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Picker("Active Call Audio Device", selection: .constant(availableAudioDevices.first?.id ?? 0)) {
-                    ForEach(availableAudioDevices) { dev in
+                Picker("Mac system output", selection: $selectedAudioDeviceId) {
+                    ForEach(availableAudioDevices.filter { $0.isOutput }) { dev in
                         Text("\(dev.name)\(dev.isBluetooth ? " (Bluetooth)" : "")").tag(dev.id)
                     }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: selectedAudioDeviceId) { _, newId in
+                    CallAudioManager.shared.setDefaultOutputDevice(id: newId)
+                }
+                Picker("Mac system microphone", selection: $selectedInputDeviceId) {
+                    ForEach(availableAudioDevices.filter { $0.isInput }) { dev in
+                        Text(dev.name).tag(dev.id)
+                    }
+                }
+                .onChange(of: selectedInputDeviceId) { _, newId in
+                    CallAudioManager.shared.setDefaultInputDevice(id: newId)
                 }
             }
         }
