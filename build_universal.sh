@@ -53,6 +53,8 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
     <string>15.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Droid Link uses Bluetooth to communicate with your Android phone and route telephone call audio.</string>
     <key>NSLocalNetworkUsageDescription</key>
@@ -62,6 +64,12 @@ cat <<EOF > "$APP_BUNDLE/Contents/Info.plist"
 </dict>
 </plist>
 EOF
+
+# Bundle AppIcon
+if [ -f "Resources/AppIcon.icns" ]; then
+    echo "Bundling AppIcon.icns..."
+    cp "Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
+fi
 
 # Bundle embedded scrcpy and adb
 if [ -d "Resources/scrcpy" ]; then
