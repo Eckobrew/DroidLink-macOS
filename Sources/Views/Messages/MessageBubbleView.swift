@@ -53,13 +53,15 @@ public struct MessageBubbleView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
 
-                    Text("•")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if message.messageType != .unknown {
+                        Text("•")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
 
-                    Text(message.messageType.rawValue)
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(message.messageType == .rcs ? .blue : .secondary)
+                        Text(message.messageType.rawValue)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(message.messageType == .rcs ? .blue : .secondary)
+                    }
                 }
                 .padding(.horizontal, 4)
 

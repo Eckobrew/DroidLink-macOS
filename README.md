@@ -9,7 +9,7 @@ A native macOS companion and desktop hub for your Android phone. Seamlessly sync
 ## Features
 
 - **End-to-End Encrypted Sync**: High-speed local Wi-Fi pairing via QR code with automatic fallback to encrypted Bluetooth LE.
-- **Messages & SMS**: Full message history, direct SMS composition with delivery callbacks, and MMS/RCS photo viewing.
+- **Messages & SMS**: Full message history, direct SMS composition with delivery callbacks, and MMS/RCS photo viewing. Notification replies show **Sent to messaging app**; SMS/RCS badges appear only when the transport is known. A handoff to the messaging app does not confirm carrier delivery.
 - **Phone Calls & Handset Audio**: In-call controls (dial, answer, reject, DTMF keypad) with Bluetooth HFP audio routing to your Mac's speakers and microphone.
 - **Persistent Menu Bar**: Quick access to live connection status, messages, calls, and settings even with the main window closed.
 - **Interactive Notifications**: Live notification sidebar with native macOS notification banner toasts and inline replies.
