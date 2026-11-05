@@ -5,6 +5,7 @@ import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.Settings;
 import com.genymobile.scrcpy.util.SettingsException;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
+import com.genymobile.scrcpy.wrappers.WindowManager;
 
 import android.os.BatteryManager;
 import android.os.Looper;
@@ -21,6 +22,8 @@ import java.io.OutputStream;
  * This is useful to restore some state when scrcpy is closed, even on device disconnection (which kills the scrcpy process).
  */
 public final class CleanUp {
+
+    private static final String SHOW_IME_WITH_HARD_KEYBOARD = "show_ime_with_hard_keyboard";
 
     // Dynamic options
     private static final int PENDING_CHANGE_DISPLAY_POWER = 1 << 0;
@@ -113,17 +116,29 @@ public final class CleanUp {
             }
         }
 
+        String restorePhoneIme = "";
+        if (options.getNewDisplay() != null && options.getDisplayImePolicy() == WindowManager.DISPLAY_IME_POLICY_HIDE) {
+            try {
+                String previous = Settings.getAndPutValue(Settings.TABLE_SECURE, SHOW_IME_WITH_HARD_KEYBOARD, "1");
+                if (!"1".equals(previous)) {
+                    restorePhoneIme = String.valueOf(previous);
+                }
+            } catch (SettingsException e) {
+                Ln.e("Could not enable the phone keyboard", e);
+            }
+        }
+
         boolean powerOffScreen = options.getPowerOffScreenOnClose();
 
         try {
-            run(displayId, restoreStayOn, disableShowTouches, powerOffScreen, restoreScreenOffTimeout, restoreDisplayImePolicy);
+            run(displayId, restoreStayOn, disableShowTouches, powerOffScreen, restoreScreenOffTimeout, restoreDisplayImePolicy, restorePhoneIme);
         } catch (IOException e) {
             Ln.e("Clean up I/O exception", e);
         }
     }
 
     private void run(int displayId, int restoreStayOn, boolean disableShowTouches, boolean powerOffScreen, int restoreScreenOffTimeout,
-            int restoreDisplayImePolicy) throws IOException {
+            int restoreDisplayImePolicy, String restorePhoneIme) throws IOException {
         String[] cmd = {
                 "app_process",
                 "/",
@@ -134,6 +149,7 @@ public final class CleanUp {
                 String.valueOf(powerOffScreen),
                 String.valueOf(restoreScreenOffTimeout),
                 String.valueOf(restoreDisplayImePolicy),
+                restorePhoneIme,
         };
 
         ProcessBuilder builder = new ProcessBuilder(cmd);
@@ -252,6 +268,18 @@ public final class CleanUp {
         if (restoreDisplayImePolicy != -1) {
             Ln.i("Restoring \"display IME policy\"");
             ServiceManager.getWindowManager().setDisplayImePolicy(displayId, restoreDisplayImePolicy);
+        }
+
+        String restorePhoneIme = args[6];
+        if (!restorePhoneIme.isEmpty()) {
+            try {
+                if ("1".equals(Settings.getValue(Settings.TABLE_SECURE, SHOW_IME_WITH_HARD_KEYBOARD))) {
+                    Settings.putValue(Settings.TABLE_SECURE, SHOW_IME_WITH_HARD_KEYBOARD,
+                            "null".equals(restorePhoneIme) ? null : restorePhoneIme);
+                }
+            } catch (SettingsException e) {
+                Ln.e("Could not restore the phone keyboard preference", e);
+            }
         }
 
         // Change the power of the main display when mirroring a virtual display

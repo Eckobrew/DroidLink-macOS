@@ -14,7 +14,7 @@ public struct AudioDeviceItem: Identifiable, Hashable, Sendable {
 public final class CallAudioManager: NSObject, @unchecked Sendable {
     public static let shared = CallAudioManager()
 
-    private var handsFreeDevice: IOBluetoothHandsFreeDevice?
+    private let handsFree = HandsFreeClient()
     private var targetDeviceName: String?
 
     private let dtmfFrequencies: [Character: (Double, Double)] = [
@@ -38,9 +38,7 @@ public final class CallAudioManager: NSObject, @unchecked Sendable {
         guard let device = pairedPhones().first(where: { $0.addressString == address }) else { return }
         UserDefaults.standard.set(address, forKey: "callBluetoothPhoneAddress")
         targetDeviceName = device.name
-        handsFreeDevice?.disconnect()
-        handsFreeDevice = IOBluetoothHandsFreeDevice(device: device, delegate: self)
-        handsFreeDevice?.connect()
+        handsFree.connect(address: address)
     }
 
     // MARK: - Bluetooth Audio Gateway & Hands-Free
@@ -48,8 +46,7 @@ public final class CallAudioManager: NSObject, @unchecked Sendable {
         if let address = UserDefaults.standard.string(forKey: "callBluetoothPhoneAddress"),
            let device = pairedPhones().first(where: { $0.addressString == address }) {
             targetDeviceName = device.name
-            if handsFreeDevice?.device != device { connectPhone(address: address) }
-            else if handsFreeDevice?.isConnected != true { handsFreeDevice?.connect() }
+            handsFree.connect(address: device.addressString)
             return
         }
         guard let name = deviceName?.lowercased(), !name.isEmpty else { return }
@@ -60,11 +57,7 @@ public final class CallAudioManager: NSObject, @unchecked Sendable {
         if let match = paired.first(where: {
             Self.matchesPhoneName($0.name ?? "", target: name) && $0.isHandsFreeAudioGateway
         }) {
-            if self.handsFreeDevice?.device != match {
-                self.handsFreeDevice?.disconnect()
-                self.handsFreeDevice = IOBluetoothHandsFreeDevice(device: match, delegate: self)
-            }
-            if self.handsFreeDevice?.isConnected != true { self.handsFreeDevice?.connect() }
+            handsFree.connect(address: match.addressString)
         }
     }
 
@@ -75,43 +68,24 @@ public final class CallAudioManager: NSObject, @unchecked Sendable {
         return name == target || name.hasSuffix(" " + target) || target.hasSuffix(" " + name)
     }
 
-    private var wantsCallAudio = false
-
-    public func startCallAudioRouting() {
-        wantsCallAudio = true
-        guard handsFreeDevice?.isConnected == true else {
-            autoConnectBluetooth(deviceName: targetDeviceName)
-            return
-        }
-        handsFreeDevice?.transferAudioToComputer()
-    }
-
-    public func transferAudioToPhone() {
-        wantsCallAudio = false
-        handsFreeDevice?.transferAudioToPhone()
-    }
-
-    public func stopCallAudioRouting() {
-        wantsCallAudio = false
-        handsFreeDevice?.disconnectSCO()
-    }
-
+    public func startCallAudioRouting() { handsFree.command("computer") }
+    public func transferAudioToPhone() { handsFree.command("phone") }
+    public func stopCallAudioRouting() { handsFree.command("stop") }
     public func disconnectPhone() {
-        stopCallAudioRouting()
-        handsFreeDevice?.disconnect()
-        handsFreeDevice = nil
-        targetDeviceName = nil
+        handsFree.disconnect(); targetDeviceName = nil
         UserDefaults.standard.removeObject(forKey: "callBluetoothPhoneAddress")
     }
-
+    public func shutdown() { handsFree.disconnect() }
     public func isBluetoothHandsetAvailable(deviceName: String? = nil) -> Bool {
-        guard let handsFreeDevice, handsFreeDevice.isConnected else { return false }
-        if let selected = UserDefaults.standard.string(forKey: "callBluetoothPhoneAddress"), handsFreeDevice.device?.addressString == selected { return true }
-        guard let target = deviceName ?? targetDeviceName else { return false }
-        return Self.matchesPhoneName(handsFreeDevice.device?.name ?? "", target: target)
+        let (address, state) = handsFree.snapshot
+        guard state.connected, let address else { return false }
+        if address == UserDefaults.standard.string(forKey: "callBluetoothPhoneAddress") { return true }
+        guard let target = deviceName ?? targetDeviceName,
+              let phone = pairedPhones().first(where: { $0.addressString == address }) else { return false }
+        return Self.matchesPhoneName(phone.name ?? "", target: target)
     }
-
-    public var isCallAudioConnected: Bool { handsFreeDevice?.isSCOConnected() == true }
+    public var isCallAudioConnected: Bool { handsFree.snapshot.1.sco }
+    public var bluetoothAudioError: String? { handsFree.snapshot.1.error }
 
     // MARK: - CoreAudio Device Management
     public func getAvailableAudioDevices() -> [AudioDeviceItem] {
@@ -300,24 +274,5 @@ public final class CallAudioManager: NSObject, @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + duration) {
             toneEngine.stop()
         }
-    }
-}
-
-extension CallAudioManager: IOBluetoothHandsFreeDeviceDelegate {
-    public func handsFree(_ device: IOBluetoothHandsFree!, connected status: NSNumber!) {
-        if status?.int32Value == 0 && wantsCallAudio { startCallAudioRouting() }
-        NotificationCenter.default.post(name: .init("BluetoothCallAudioChanged"), object: nil)
-    }
-
-    public func handsFree(_ device: IOBluetoothHandsFree!, disconnected status: NSNumber!) {
-        NotificationCenter.default.post(name: .init("BluetoothCallAudioChanged"), object: nil)
-    }
-
-    public func handsFree(_ device: IOBluetoothHandsFree!, scoConnectionOpened status: NSNumber!) {
-        NotificationCenter.default.post(name: .init("BluetoothCallAudioChanged"), object: nil)
-    }
-
-    public func handsFree(_ device: IOBluetoothHandsFree!, scoConnectionClosed status: NSNumber!) {
-        NotificationCenter.default.post(name: .init("BluetoothCallAudioChanged"), object: nil)
     }
 }

@@ -77,12 +77,12 @@ public struct AppsView: View {
 
                     // Mirror Entire Screen Shortcut
                     Button {
-                        ScrcpyManager.shared.launchScrcpy(phoneIp: ConnectionManager.shared.connectedIp)
+                        NativeMirrorManager.shared.start()
                     } label: {
                         Label("Mirror Screen", systemImage: "iphone")
                     }
                     .buttonStyle(.bordered)
-                    .help("Launch wireless screen mirror via embedded scrcpy")
+                    .help("Mirror your phone without Android debugging")
 
                     // Refresh Button
                     Button {

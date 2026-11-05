@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct SettingsView: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage(AppMirroringMethod.settingsKey) private var appMirroringMethod = AppMirroringMethod.defaultMethod
     @State private var availableAudioDevices: [AudioDeviceItem] = CallAudioManager.shared.getAvailableAudioDevices()
     @State private var selectedAudioDeviceId: UInt32 = CallAudioManager.shared.getDefaultOutputDevice() ?? 0
     @State private var selectedInputDeviceId: UInt32 = CallAudioManager.shared.getDefaultInputDevice() ?? 0
@@ -17,6 +18,16 @@ public struct SettingsView: View {
 
                 Form {
                     connectionSection
+                    Section("Android Apps") {
+                        Picker("Mirroring method", selection: $appMirroringMethod) {
+                            ForEach(AppMirroringMethod.allCases, id: \.self) { method in
+                                Text(method.title).tag(method)
+                            }
+                        }
+                        Text("scncpy tries USB before Wi-Fi. Bluetooth can open apps on your phone.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     callsSection
                     if appState.pairedDevice != nil {
                         dangerZoneSection
