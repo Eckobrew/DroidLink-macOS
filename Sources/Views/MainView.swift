@@ -50,14 +50,19 @@ public struct MainView: View {
                         )
                     }
 
+                    ToolbarItem(placement: .primaryAction) { DesktopModeButton() }
                     ToolbarItem(placement: .primaryAction) {
                         Button(action: {
-                            ScrcpyManager.shared.launchScrcpy(phoneIp: appState.connectedIp)
+                            NativeMirrorManager.shared.start()
                         }) {
                             Label("Mirror Screen", systemImage: "display")
                                 .font(.system(size: 11.5, weight: .medium))
                         }
-                        .help("Launch screen copy mirroring with scrcpy")
+                        .help("Mirror your phone without Android debugging")
+                        .contextMenu {
+                            Button("Mirror Screen") { NativeMirrorManager.shared.start() }
+                            Button("Desktop Mode (ADB)") { NativeMirrorManager.shared.startDesktop() }
+                        }
                     }
                 }
             }

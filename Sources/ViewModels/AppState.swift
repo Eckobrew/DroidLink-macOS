@@ -161,6 +161,7 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         connectionManager.connectedIp
     }
 
+    private var mirrorAudioSubscription: AnyCancellable?
     private var persistsCache = true
 
     public init(startServices: Bool = true) {
@@ -182,24 +183,25 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
             Task { @MainActor in self?.checkBluetoothHandsetStatus() }
         }
 
-        NotificationCenter.default.addObserver(forName: NSNotification.Name("AudioHandoffChanged"), object: nil, queue: .main) { @Sendable [weak self] _ in
-            Task { @MainActor in
-                self?.isAudioHandoffActive = ScrcpyManager.shared.isAudioHandoffActive
-            }
-        }
+        mirrorAudioSubscription = NativeMirrorManager.shared.$audioActive.combineLatest(NativeMirrorManager.shared.$muted)
+            .sink { [weak self] active, muted in self?.isAudioHandoffActive = active && !muted }
     }
 
     // MARK: - Media Controls & Audio Handoff
     public func toggleAudioHandoff() {
-        ScrcpyManager.shared.toggleAudioHandoff(phoneIp: connectedIp) { [weak self] success, msg in
-            Task { @MainActor in
-                self?.isAudioHandoffActive = ScrcpyManager.shared.isAudioHandoffActive
-            }
+        let mirror = NativeMirrorManager.shared
+        if mirror.audioActive { mirror.setMuted(!mirror.muted) }
+        else {
+            if mirror.isActive { mirror.stop() }
+            mirror.includeAudio = true
+            mirror.setMuted(false)
+            mirror.start()
         }
     }
 
     public func sendMediaCommand(_ action: String) {
-        let payload: [String: String] = ["action": action]
+        guard activeTransport != .none, let media = activeMediaNotification else { return }
+        let payload: [String: String] = ["action": action, "notificationId": media.id]
         if let json = try? JSONEncoder().encode(payload),
            let str = String(data: json, encoding: .utf8) {
             let env = MessageEnvelope(type: .mediaControl, payload: str)
@@ -208,8 +210,9 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
     }
 
     public func updateActiveMediaNotification() {
+        guard activeTransport != .none else { activeMediaNotification = nil; return }
         let found = notifications.first { notif in
-            notif.isMediaPlayback == true
+            notif.isMediaPlayback == true && notif.mediaSessionVerified == true
         }
         self.activeMediaNotification = found
     }
@@ -234,6 +237,8 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
     public nonisolated func connectionManager(didUpdateTransport transport: ActiveTransport) {
         Task { @MainActor in
             self.activeTransport = transport
+            NativeMirrorManager.shared.transportChanged(transport)
+            self.updateActiveMediaNotification()
         }
     }
 
@@ -249,6 +254,10 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         let decoder = JSONDecoder()
 
         switch envelope.type {
+        case .mirrorStatus:
+            if let data = envelope.payload.data(using: .utf8), let status = try? decoder.decode(MirrorStatus.self, from: data) {
+                NativeMirrorManager.shared.receiveStatus(status)
+            }
         case .chatMessage:
             if let data = envelope.payload.data(using: .utf8),
                let msg = try? decoder.decode(ChatMessage.self, from: data) {
@@ -394,7 +403,7 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         self.notifications.removeAll { $0.id == id }
         self.unreadNotificationCount = self.notifications.count
         self.updateActiveMediaNotification()
-        if Bundle.main.bundleIdentifier != nil {
+        if persistsCache && Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
         }
         saveCachedData()
@@ -412,7 +421,8 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
         // 2. Remove locally
         self.notifications.removeAll { $0.id == notification.id }
         self.unreadNotificationCount = self.notifications.count
-        if Bundle.main.bundleIdentifier != nil {
+        self.updateActiveMediaNotification()
+        if persistsCache && Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notification.id])
         }
         saveCachedData()
@@ -470,11 +480,7 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
             connectionManager.sendEnvelope(envelope)
         }
 
-        ScrcpyManager.shared.launchScrcpy(
-            packageName: notification.packageName,
-            appTitle: notification.appName,
-            phoneIp: connectionManager.connectedIp
-        )
+        NativeMirrorManager.shared.start(packageName: notification.packageName)
     }
 
     public func refreshNotifications() {
@@ -511,8 +517,8 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
             connectionManager.sendEnvelope(envelope)
         }
 
-        // 2. Launch bundled scrcpy mirroring window for this app
-        ScrcpyManager.shared.launchScrcpy(for: app, phoneIp: connectionManager.connectedIp)
+        // 2. Open the native mirror, requesting phone consent when needed
+        NativeMirrorManager.shared.start(packageName: app.packageName)
     }
 
     public func refreshApps() {
@@ -1033,6 +1039,7 @@ public final class AppState: ObservableObject, ConnectionManagerDelegate {
     public func checkBluetoothHandsetStatus() {
         isBluetoothHandsetPaired = audioManager.isBluetoothHandsetAvailable(deviceName: pairedDevice?.name)
         isCallAudioConnected = audioManager.isCallAudioConnected
+        if let error = audioManager.bluetoothAudioError { callError = error }
     }
 
     public func initiateBluetoothPairing() {

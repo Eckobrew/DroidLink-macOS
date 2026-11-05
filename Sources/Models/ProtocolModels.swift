@@ -45,6 +45,9 @@ public enum EnvelopeType: String, Codable, Sendable {
     case notificationRemoved = "notification_removed"
     case notificationDismiss = "notification_dismiss"
     case mediaControl = "media_control"
+    case mirrorStart = "mirror_start"
+    case mirrorStop = "mirror_stop"
+    case mirrorStatus = "mirror_status"
     case unpair = "unpair"
 }
 
@@ -518,6 +521,7 @@ public struct AppNotification: Codable, Identifiable, Hashable, Sendable {
     public let canReply: Bool
     public let isClearable: Bool
     public let isMediaPlayback: Bool?
+    public let mediaSessionVerified: Bool?
 
     public init(
         id: String,
@@ -530,7 +534,8 @@ public struct AppNotification: Codable, Identifiable, Hashable, Sendable {
         iconBase64: String? = nil,
         canReply: Bool = false,
         isClearable: Bool = true,
-        isMediaPlayback: Bool? = false
+        isMediaPlayback: Bool? = false,
+        mediaSessionVerified: Bool? = nil
     ) {
         self.id = id
         self.packageName = packageName
@@ -543,6 +548,7 @@ public struct AppNotification: Codable, Identifiable, Hashable, Sendable {
         self.canReply = canReply
         self.isClearable = isClearable
         self.isMediaPlayback = isMediaPlayback
+        self.mediaSessionVerified = mediaSessionVerified
     }
 
     public var date: Date {

@@ -311,6 +311,7 @@ private struct MediaControlsSidebarSection: View {
                 Spacer()
             }
             .padding(.vertical, 1)
+            .disabled(appState.activeMediaNotification == nil || appState.activeTransport == .none)
 
             // Audio Handoff Button
             Button(action: {
@@ -320,7 +321,7 @@ private struct MediaControlsSidebarSection: View {
                     Image(systemName: appState.isAudioHandoffActive ? "speaker.wave.3.fill" : "airplayaudio")
                         .font(.system(size: 11, weight: .semibold))
 
-                    Text(appState.isAudioHandoffActive ? "Playing on Mac • Hand Back" : "Hand Off Audio to Mac")
+                    Text(appState.isAudioHandoffActive ? "Phone audio on Mac • Mute" : "Listen to Phone Audio")
                         .font(.system(size: 10.5, weight: .semibold))
                         .lineLimit(1)
                 }
@@ -349,7 +350,7 @@ private struct MediaControlsSidebarSection: View {
                 )
             }
             .buttonStyle(.plain)
-            .help(appState.isAudioHandoffActive ? "Disconnect audio stream and play on phone" : "Stream phone's internal audio to MacBook speakers")
+            .help(appState.isAudioHandoffActive ? "Mute phone audio on this Mac" : "Share supported app audio after approving screen sharing on your phone")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

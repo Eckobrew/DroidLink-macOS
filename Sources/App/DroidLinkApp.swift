@@ -3,7 +3,9 @@ import SwiftUI
 @main
 struct DroidLinkLauncher {
     static func main() {
-        if ProcessInfo.processInfo.environment["DROIDLINK_TRANSPORT_PROBE"] == "1" {
+        if ProcessInfo.processInfo.environment["DROIDLINK_HANDSFREE_HELPER"] == "1" {
+            HandsFreeWorker.run()
+        } else if ProcessInfo.processInfo.environment["DROIDLINK_TRANSPORT_PROBE"] == "1" {
             Task { @MainActor in await TransportProbe().run() }
             RunLoop.main.run()
         } else { DroidLinkApp.main() }
@@ -18,6 +20,7 @@ struct DroidLinkApp: App {
         WindowGroup(id: "main") {
             MainView()
                 .environmentObject(appState)
+                .background(MirrorMainWindowAnchor())
                 .frame(minWidth: 850, minHeight: 550)
         }
         .windowStyle(.titleBar)
@@ -29,6 +32,14 @@ struct DroidLinkApp: App {
                     appState.selectedNavigation = .messages
                 }
                 .keyboardShortcut("n", modifiers: [.command])
+
+                Button("Close Stream") { NativeMirrorManager.shared.closeStreams() }
+                    .keyboardShortcut("q", modifiers: [.control, .option, .shift])
+                Button("Mirror Screen") { NativeMirrorManager.shared.start() }
+                Menu("Desktop Mode (ADB)") {
+                    Button("Windowed — 1080p") { NativeMirrorManager.shared.startDesktop(mode: .windowed1080p) }
+                    Button("Full screen — New Space") { NativeMirrorManager.shared.startDesktop(mode: .fullScreen) }
+                }
 
                 Button("Open Dialer") {
                     appState.selectedNavigation = .calls
@@ -48,6 +59,14 @@ struct DroidLinkApp: App {
 }
 
 final class DroidLinkAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) { StreamCloseShortcut.shared.register() }
+    func applicationWillTerminate(_ notification: Notification) {
+        NativeMirrorManager.shared.stop()
+        ScrcpyManager.shared.terminateSession()
+        ScrcpyManager.shared.stopAudioHandoff()
+        CallAudioManager.shared.shutdown()
+        StreamCloseShortcut.shared.unregister()
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
@@ -63,6 +82,16 @@ private struct DroidLinkMenu: View {
         Button("Messages") { appState.selectedNavigation = .messages; showWindow() }
         Button("Calls") { appState.selectedNavigation = .calls; showWindow() }
         Divider()
+        Button("Mirror Screen") { NativeMirrorManager.shared.start() }
+        Menu("Desktop Mode (ADB)") {
+            Button("Windowed — 1080p") { NativeMirrorManager.shared.startDesktop(mode: .windowed1080p) }
+            Button("Full screen — New Space") { NativeMirrorManager.shared.startDesktop(mode: .fullScreen) }
+        }
+        Button("Mirror with phone display off (ADB)") {
+            NativeMirrorManager.shared.stop()
+            ScrcpyManager.shared.launchScrcpy(phoneIp: appState.connectedIp, turnScreenOff: true)
+        }
+        Button("Mirror with scrcpy (ADB)") { ScrcpyManager.shared.launchScrcpy(phoneIp: appState.connectedIp) }
         Button("Settings…") { appState.selectedNavigation = .settings; showWindow() }
         Divider()
         Button("Quit Droid Link") { NSApplication.shared.terminate(nil) }

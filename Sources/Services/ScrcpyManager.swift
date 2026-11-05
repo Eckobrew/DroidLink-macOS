@@ -141,6 +141,8 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         packageName: String? = nil,
         appTitle: String? = nil,
         phoneIp: String? = nil,
+        turnScreenOff: Bool = false,
+        desktop: DesktopDisplayConfiguration? = nil,
         completion: (@Sendable (Bool, String) -> Void)? = nil
     ) {
         guard let scrcpyPath = getScrcpyExecutablePath() else {
@@ -175,7 +177,9 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             process.executableURL = URL(fileURLWithPath: scrcpyPath)
 
             var arguments: [String] = ["--stay-awake"]
-            let title = name != nil ? "Droid Link — \(name!)" : "Droid Link Screen Mirror"
+            if turnScreenOff { arguments.append("--turn-screen-off") }
+            if let desktop { arguments += desktop.arguments }
+            let title = desktop != nil ? "Droid Link — Android Desktop" : (name != nil ? "Droid Link — \(name!)" : "Droid Link Screen Mirror")
             arguments.append("--window-title=\(title)")
 
             if let pkg = targetPkg, !pkg.isEmpty {
@@ -190,6 +194,9 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             environment["ADB"] = adbPath
             // Keep the SDL helper from promoting itself to a separate Dock app.
             environment["SDL_MAC_BACKGROUND_APP"] = "1"
+            // Borderless fullscreen desktop in its own macOS Space, with no exclusive display-mode switch.
+            environment["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "1"
+            if desktop?.fullScreen == true { environment["SDL_VIDEO_MAC_FULLSCREEN_MENU_VISIBILITY"] = "0" }
             if let serverPath = self.getScrcpyServerPath() {
                 environment["SCRCPY_SERVER_PATH"] = serverPath
             }
@@ -329,6 +336,8 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             environment["ADB"] = adbPath
             // Keep the SDL helper from promoting itself to a separate Dock app.
             environment["SDL_MAC_BACKGROUND_APP"] = "1"
+            // Borderless fullscreen desktop in its own macOS Space, with no exclusive display-mode switch.
+            environment["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "1"
             if let serverPath = self.getScrcpyServerPath() {
                 environment["SCRCPY_SERVER_PATH"] = serverPath
             }
