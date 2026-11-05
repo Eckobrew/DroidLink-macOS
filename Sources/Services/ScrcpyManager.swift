@@ -14,6 +14,32 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         super.init()
     }
 
+    private var developmentResources: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/scrcpy")
+    }
+
+    // Drain both streams while the child runs: unread pipes eventually block scrcpy.
+    private func captureOutput(of process: Process) {
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        for pipe in [output, error] {
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                } else if let message = String(data: data, encoding: .utf8) {
+                    print("[ScrcpyManager] \(message.trimmingCharacters(in: .whitespacesAndNewlines))")
+                }
+            }
+        }
+    }
+
     // MARK: - Binary Path Detection
     public func getScrcpyExecutablePath() -> String? {
         // 1. App Bundle Resources
@@ -35,7 +61,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         }
 
         // 3. Project Source Resources (during development/direct execution)
-        let sourcePath = "/Users/nathanwillems/Documents/DroidDock/DroidLink-macOS/Resources/scrcpy/scrcpy"
+        let sourcePath = developmentResources.appendingPathComponent("scrcpy").path
         if FileManager.default.isExecutableFile(atPath: sourcePath) {
             return sourcePath
         }
@@ -67,7 +93,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             }
         }
 
-        let sourcePath = "/Users/nathanwillems/Documents/DroidDock/DroidLink-macOS/Resources/scrcpy/adb"
+        let sourcePath = developmentResources.appendingPathComponent("adb").path
         if FileManager.default.isExecutableFile(atPath: sourcePath) {
             return sourcePath
         }
@@ -102,7 +128,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             }
         }
 
-        let sourcePath = "/Users/nathanwillems/Documents/DroidDock/DroidLink-macOS/Resources/scrcpy/scrcpy-server"
+        let sourcePath = developmentResources.appendingPathComponent("scrcpy-server").path
         if FileManager.default.fileExists(atPath: sourcePath) {
             return sourcePath
         }
@@ -134,9 +160,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             guard let self = self else { return }
 
             // 1. Ensure ADB is connected to the phone
-            if let ip = phoneIp, !ip.isEmpty {
-                self.connectAdb(adbPath: adbPath, ip: ip)
-            }
+            let serial = phoneIp.flatMap { $0.isEmpty ? nil : self.connectAdb(adbPath: adbPath, ip: $0) }
 
             self.processLock.lock()
             // If already running for this exact app, bring window forward
@@ -158,11 +182,14 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
                 arguments.append("--start-app=\(pkg)")
             }
 
+            if let serial { arguments.append("--serial=\(serial)") }
             process.arguments = arguments
 
             // Setup environment
             var environment = ProcessInfo.processInfo.environment
             environment["ADB"] = adbPath
+            // Keep the SDL helper from promoting itself to a separate Dock app.
+            environment["SDL_MAC_BACKGROUND_APP"] = "1"
             if let serverPath = self.getScrcpyServerPath() {
                 environment["SCRCPY_SERVER_PATH"] = serverPath
             }
@@ -170,17 +197,21 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             environment["PATH"] = "\(scrcpyDir):\(currentPath)"
             process.environment = environment
 
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
+            self.captureOutput(of: process)
 
             process.terminationHandler = { [weak self] proc in
-                self?.processLock.lock()
-                self?.isRunning = false
-                self?.activeAppPackage = nil
-                self?.activeProcess = nil
-                self?.processLock.unlock()
+                guard let self else { return }
+                self.processLock.lock()
+                let isCurrent = self.activeProcess === proc
+                if isCurrent {
+                    self.isRunning = false
+                    self.activeAppPackage = nil
+                    self.activeProcess = nil
+                }
+                self.processLock.unlock()
+                if isCurrent && proc.terminationStatus != 0 {
+                    completion?(false, "Screen mirroring stopped (exit \(proc.terminationStatus)). Check that USB debugging is enabled and this Mac is authorized in Android's debugging settings.")
+                }
                 print("[ScrcpyManager] scrcpy exited with code: \(proc.terminationStatus)")
             }
 
@@ -201,12 +232,41 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func connectAdb(adbPath: String, ip: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["connect", "\(ip):5555"]
-        try? process.run()
-        process.waitUntilExit()
+    static func wirelessEndpoint(in services: String, host: String) -> String? {
+        services.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count == 3, fields[1] == "_adb-tls-connect._tcp",
+                  fields[2].hasPrefix("\(host):") else { return nil }
+            return String(fields[2])
+        }.first
+    }
+
+    @discardableResult
+    private func connectAdb(adbPath: String, ip: String) -> String? {
+        let discovery = Process()
+        discovery.executableURL = URL(fileURLWithPath: adbPath)
+        discovery.arguments = ["mdns", "services"]
+        let output = Pipe()
+        discovery.standardOutput = output
+        var endpoint = "\(ip):5555" // Legacy adb tcpip fallback.
+        do {
+            try discovery.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            discovery.waitUntilExit()
+            if let services = String(data: data, encoding: .utf8),
+               let discovered = Self.wirelessEndpoint(in: services, host: ip) {
+                endpoint = discovered
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: adbPath)
+            process.arguments = ["connect", endpoint]
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0 ? endpoint : nil
+        } catch {
+            print("[ScrcpyManager] Could not connect ADB: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     public func terminateSession() {
@@ -245,9 +305,7 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            if let ip = phoneIp, !ip.isEmpty {
-                self.connectAdb(adbPath: adbPath, ip: ip)
-            }
+            let serial = phoneIp.flatMap { $0.isEmpty ? nil : self.connectAdb(adbPath: adbPath, ip: $0) }
 
             self.processLock.lock()
             if let current = self.audioHandoffProcess, current.isRunning {
@@ -265,9 +323,12 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
                 "--audio-source=output",
                 "--audio-buffer=50"
             ]
+            if let serial { process.arguments?.append("--serial=\(serial)") }
 
             var environment = ProcessInfo.processInfo.environment
             environment["ADB"] = adbPath
+            // Keep the SDL helper from promoting itself to a separate Dock app.
+            environment["SDL_MAC_BACKGROUND_APP"] = "1"
             if let serverPath = self.getScrcpyServerPath() {
                 environment["SCRCPY_SERVER_PATH"] = serverPath
             }
@@ -275,16 +336,18 @@ public final class ScrcpyManager: NSObject, @unchecked Sendable {
             environment["PATH"] = "\(scrcpyDir):\(currentPath)"
             process.environment = environment
 
-            let outputPipe = Pipe()
-            let errorPipe = Pipe()
-            process.standardOutput = outputPipe
-            process.standardError = errorPipe
+            self.captureOutput(of: process)
 
             process.terminationHandler = { [weak self] proc in
-                self?.processLock.lock()
-                self?.isAudioHandoffActive = false
-                self?.audioHandoffProcess = nil
-                self?.processLock.unlock()
+                guard let self else { return }
+                self.processLock.lock()
+                let isCurrent = self.audioHandoffProcess === proc
+                if isCurrent {
+                    self.isAudioHandoffActive = false
+                    self.audioHandoffProcess = nil
+                }
+                self.processLock.unlock()
+                guard isCurrent else { return }
                 print("[ScrcpyManager] Audio handoff terminated (status: \(proc.terminationStatus))")
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: NSNotification.Name("AudioHandoffChanged"), object: nil)
