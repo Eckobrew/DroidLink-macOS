@@ -1,0 +1,55 @@
+name: macOS CI & Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Universal macOS App
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Show Xcode & Swift Versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run Swift Package Tests
+        run: swift test
+
+      - name: Build Universal Binary & App Bundle
+        run: |
+          chmod +x build_universal.sh
+          ./build_universal.sh
+
+      - name: Package Universal App Zip
+        run: |
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent "Droid Link.app" "DroidLink-macOS-Universal.zip"
+          ls -lh "DroidLink-macOS-Universal.zip"
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DroidLink-macOS-Universal
+          path: build/DroidLink-macOS-Universal.zip
+          if-no-files-found: error
+
+      - name: Release macOS Asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/DroidLink-macOS-Universal.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
